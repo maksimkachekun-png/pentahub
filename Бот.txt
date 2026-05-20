@@ -598,7 +598,7 @@ def handle_code_success(call):
             f"🎉 **НОМЕР УСПЕШНО ВСТАЛ!**\n\n"
             f"📱 `{order[1]}`\n"
             f"✅ Статус: Подтверждено\n\n"
-            f"💰 Начисление: **${price:.2f}**\n"
+            f"💰 Сумма в холде: **${price:.2f}**\n"
             f"⏱ Холд: {ht//60} мин\n\n"
             f"💎 Средства поступят через {ht//60} минут",
             parse_mode='Markdown')
@@ -784,28 +784,37 @@ def handle_qr_success(call):
     c = conn.cursor()
     c.execute('SELECT user_id FROM qr_queue WHERE id=?', (qr_id,))
     qr = c.fetchone()
+    
     if qr:
         price = float(get_setting('qr_price','4.00'))
         ht = int(get_setting('hold_time','300'))
         
-        c.execute('UPDATE qr_queue SET status="completed", completed=1, completed_at=CURRENT_TIMESTAMP WHERE id=?', (qr_id,))
+        c.execute('''
+            UPDATE qr_queue 
+            SET status='completed', completed=1, completed_at=CURRENT_TIMESTAMP 
+            WHERE id=?
+        ''', (qr_id,))
+        
         c.execute('UPDATE users SET total_orders=total_orders+1, hold_balance=hold_balance+? WHERE user_id=?', (price, qr[0]))
+        
         conn.commit()
         
         c.execute('SELECT status, completed FROM qr_queue WHERE id=?', (qr_id,))
         check_qr = c.fetchone()
-        c.execute('SELECT balance, hold_balance FROM users WHERE user_id=?', (qr[0],))
+        c.execute('SELECT balance, hold_balance, total_earned FROM users WHERE user_id=?', (qr[0],))
         check_user = c.fetchone()
-        logger.info(f"🔍 QR #{qr_id}: status={check_qr[0]}, completed={check_qr[1]}")
-        logger.info(f"🔍 User {qr[0]}: balance={check_user[0]}, hold={check_user[1]}")
+        
+        logger.info(f"🔍 ПРОВЕРКА QR #{qr_id}: status={check_qr[0]}, completed={check_qr[1]}")
+        logger.info(f"🔍 ПРОВЕРКА User {qr[0]}: balance={check_user[0]}, hold={check_user[1]}, earned={check_user[2]}")
         
         conn.close()
         
         try:
             bot.send_message(qr[0],
                 f"🎉 **QR УСПЕШНО ПРИНЯТ!**\n\n"
-                f"📷 QR-код\n✅ Вход подтвержден!\n\n"
-                f"💰 Начисление: **${price:.2f}**\n"
+                f"📷 QR-код\n"
+                f"✅ Вход подтвержден!\n\n"
+                f"💰 Сумма в холде: **${price:.2f}**\n"
                 f"⏱ Холд: {ht//60} мин\n\n"
                 f"💎 Средства поступят через {ht//60} минут",
                 parse_mode='Markdown')
