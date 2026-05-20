@@ -10,14 +10,14 @@ import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-TOKEN = 'YOUR_BOT_TOKEN'
-CHANNEL_ID = '@your_channel'
-PRIVATE_CHANNEL = False
-GROUP_ID = -1001234567890
-ADMIN_IDS = [123456789]
-CHAT_LINK = 'https://t.me/your_chat'
-SUPPORT_USERNAME = '@admin_support'
-WORK_HOURS = '09:00 - 02:00 МСК'
+TOKEN = '8914620768:AAGJu4YZunEBve7jmsIGB30AsEOTUSkK0Nk'
+CHANNEL_ID = 'https://t.me/+zBRefeG6YRwwMzA6'
+PRIVATE_CHANNEL = True
+GROUP_ID = -1003939065437
+ADMIN_IDS = [8632861931]
+CHAT_LINK = 'https://t.me/+8gom3a4YaUFiOWNi'
+SUPPORT_USERNAME = '@pentahubsupport'
+WORK_HOURS = '08:00 - 19:00 МСК'
 
 bot = telebot.TeleBot(TOKEN)
 user_states = {}
