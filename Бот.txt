@@ -1,0 +1,1396 @@
+import telebot
+from telebot import types
+import sqlite3
+import re
+import time
+import threading
+from datetime import datetime
+import logging
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+TOKEN = 'YOUR_BOT_TOKEN'
+CHANNEL_ID = '@your_channel'
+PRIVATE_CHANNEL = False
+GROUP_ID = -1001234567890
+ADMIN_IDS = [123456789]
+CHAT_LINK = 'https://t.me/your_chat'
+SUPPORT_USERNAME = '@admin_support'
+WORK_HOURS = '09:00 - 02:00 МСК'
+
+bot = telebot.TeleBot(TOKEN)
+user_states = {}
+
+def init_db():
+    conn = sqlite3.connect('max_bot.db')
+    cursor = conn.cursor()
+    cursor.executescript('''
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY, username TEXT, balance REAL DEFAULT 0,
+            total_earned REAL DEFAULT 0, total_withdrawn REAL DEFAULT 0,
+            hold_balance REAL DEFAULT 0, total_orders INTEGER DEFAULT 0,
+            success_orders INTEGER DEFAULT 0, cancelled_orders INTEGER DEFAULT 0,
+            registration_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            last_activity TIMESTAMP DEFAULT CURRENT_TIMESTAMP, is_blocked BOOLEAN DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS code_queue (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, phone_number TEXT,
+            status TEXT DEFAULT 'waiting', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            taken_by INTEGER, taken_at TIMESTAMP, code_sent BOOLEAN DEFAULT 0,
+            code_value TEXT, attempts INTEGER DEFAULT 0, completed_at TIMESTAMP,
+            failed_at TIMESTAMP, problem_at TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS qr_queue (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER,
+            status TEXT DEFAULT 'waiting', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            taken_by INTEGER, taken_at TIMESTAMP, qr_sent BOOLEAN DEFAULT 0,
+            qr_file_id TEXT, qr_message_id INTEGER, attempts INTEGER DEFAULT 0,
+            completed INTEGER DEFAULT 0, completed_at TIMESTAMP, failed_at TIMESTAMP,
+            problem_at TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS transactions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, amount REAL,
+            type TEXT, description TEXT, status TEXT DEFAULT 'completed',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS withdraw_requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, amount REAL,
+            status TEXT DEFAULT 'pending', admin_id INTEGER, check_link TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, processed_at TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY, value TEXT, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+    ''')
+    for key, value in [('code_price','4.00'),('qr_price','4.00'),('min_withdraw','1.00'),('hold_time','300')]:
+        cursor.execute('INSERT OR IGNORE INTO settings (key, value) VALUES (?,?)', (key, value))
+    conn.commit()
+    conn.close()
+
+init_db()
+
+def is_admin(uid): return uid in ADMIN_IDS
+def get_setting(key, default=None):
+    conn = sqlite3.connect('max_bot.db')
+    c = conn.cursor()
+    c.execute('SELECT value FROM settings WHERE key=?', (key,))
+    r = c.fetchone()
+    conn.close()
+    return r[0] if r else default
+
+def update_setting(key, value):
+    conn = sqlite3.connect('max_bot.db')
+    c = conn.cursor()
+    c.execute('INSERT OR REPLACE INTO settings (key,value,updated_at) VALUES (?,?,CURRENT_TIMESTAMP)', (key, str(value)))
+    conn.commit()
+    conn.close()
+
+def check_subscription(uid):
+    try:
+        member = bot.get_chat_member(CHANNEL_ID, uid)
+        return member.status in ['member','administrator','creator']
+    except Exception as e:
+        logger.error(f"Ошибка проверки подписки: {e}")
+        return False
+
+def get_queue_position(uid, qtype='code'):
+    conn = sqlite3.connect('max_bot.db')
+    c = conn.cursor()
+    if qtype == 'code':
+        c.execute('SELECT COUNT(*) FROM code_queue WHERE status="waiting" AND id<=(SELECT COALESCE(MIN(id),0) FROM code_queue WHERE user_id=? AND status="waiting")', (uid,))
+    else:
+        c.execute('SELECT COUNT(*) FROM qr_queue WHERE status="waiting" AND id<=(SELECT COALESCE(MIN(id),0) FROM qr_queue WHERE user_id=? AND status="waiting")', (uid,))
+    p = c.fetchone()[0]
+    conn.close()
+    return p
+
+def add_to_queue(uid, qtype='code', phone=None):
+    conn = sqlite3.connect('max_bot.db')
+    c = conn.cursor()
+    if qtype == 'code':
+        c.execute('SELECT id FROM code_queue WHERE user_id=? AND status="waiting"', (uid,))
+        if c.fetchone():
+            conn.close()
+            return False, "Вы уже в очереди"
+        c.execute('INSERT INTO code_queue (user_id,phone_number,status) VALUES (?,?,"waiting")', (uid, phone))
+    else:
+        c.execute('SELECT id FROM qr_queue WHERE user_id=? AND status="waiting"', (uid,))
+        if c.fetchone():
+            conn.close()
+            return False, "Вы уже в очереди QR"
+        c.execute('INSERT INTO qr_queue (user_id,status) VALUES (?,"waiting")', (uid,))
+    conn.commit()
+    conn.close()
+    return True, "Добавлены в очередь"
+
+def send_to_group(text, markup=None, thread_id=None):
+    try:
+        bot.send_message(GROUP_ID, text, parse_mode='Markdown', reply_markup=markup, message_thread_id=thread_id)
+    except Exception as e:
+        logger.error(f"Ошибка отправки в группу: {e}")
+        try:
+            bot.send_message(GROUP_ID, text, parse_mode='Markdown', reply_markup=markup)
+        except:
+            pass
+
+def get_main_keyboard():
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    markup.add(
+        types.InlineKeyboardButton("💰 Сдать Max", callback_data='sell_max'),
+        types.InlineKeyboardButton("👤 Мой профиль", callback_data='profile'),
+        types.InlineKeyboardButton("📖 Инструкция", callback_data='instruction'),
+        types.InlineKeyboardButton("🆘 Поддержка", callback_data='support'),
+        types.InlineKeyboardButton("💬 Наш чат", url=CHAT_LINK)
+    )
+    return markup
+
+def show_main_menu(chat_id, message_id=None):
+    code_price = float(get_setting('code_price','4.00'))
+    qr_price = float(get_setting('qr_price','4.00'))
+    menu_text = (
+        "╭━━━━━━━━━━━━━━━━━━╮\n"
+        "│  🏠 **ГЛАВНОЕ МЕНЮ**  │\n"
+        "╰━━━━━━━━━━━━━━━━━━╯\n\n"
+        "👋 Добро пожаловать в MaxBot!\n"
+        "Лучший сервис для сдачи номеров\n\n"
+        "▫️ Сдача по коду: **${:.2f}**\n"
+        "▫️ Сдача по QR: **${:.2f}**\n\n"
+        "📍 Выберите действие:"
+    ).format(code_price, qr_price)
+    markup = get_main_keyboard()
+    if message_id:
+        try: bot.edit_message_text(menu_text, chat_id, message_id, parse_mode='Markdown', reply_markup=markup)
+        except: bot.send_message(chat_id, menu_text, parse_mode='Markdown', reply_markup=markup)
+    else:
+        bot.send_message(chat_id, menu_text, parse_mode='Markdown', reply_markup=markup)
+
+@bot.message_handler(commands=['start'])
+def start_command(message):
+    uid = message.from_user.id
+    if not check_subscription(uid):
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        if PRIVATE_CHANNEL:
+            try:
+                invite_link = bot.export_chat_invite_link(CHANNEL_ID)
+                markup.add(types.InlineKeyboardButton("📢 Подписаться на канал", url=invite_link))
+            except:
+                markup.add(types.InlineKeyboardButton("📢 Подписаться на канал", url=CHAT_LINK))
+        else:
+            markup.add(types.InlineKeyboardButton("📢 Подписаться на канал", url=f'https://t.me/{CHANNEL_ID[1:]}'))
+        markup.add(types.InlineKeyboardButton("✅ Я подписался", callback_data='check_sub'))
+        bot.send_message(message.chat.id,
+            "🔒 **ДОСТУП ОГРАНИЧЕН**\n\n"
+            "❌ Для использования бота необходимо\n"
+            "подписаться на наш канал!\n\n"
+            "📢 Подпишитесь и нажмите кнопку проверки",
+            parse_mode='Markdown', reply_markup=markup)
+        return
+    conn = sqlite3.connect('max_bot.db')
+    c = conn.cursor()
+    c.execute('INSERT OR IGNORE INTO users (user_id, username) VALUES (?,?)', (uid, message.from_user.username))
+    conn.commit()
+    conn.close()
+    show_main_menu(message.chat.id)
+
+@bot.callback_query_handler(func=lambda call: call.data == 'check_sub')
+def check_sub(call):
+    if check_subscription(call.from_user.id):
+        bot.answer_callback_query(call.id, "✅ Доступ открыт!")
+        conn = sqlite3.connect('max_bot.db')
+        c = conn.cursor()
+        c.execute('INSERT OR IGNORE INTO users (user_id, username) VALUES (?,?)', (call.from_user.id, call.from_user.username))
+        conn.commit()
+        conn.close()
+        show_main_menu(call.message.chat.id)
+    else:
+        bot.answer_callback_query(call.id, "❌ Вы ещё не подписались!", show_alert=True)
+
+def show_sell_options(message):
+    code_price = float(get_setting('code_price','4.00'))
+    qr_price = float(get_setting('qr_price','4.00'))
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    markup.add(types.InlineKeyboardButton("📱 Сдать по коду", callback_data='sell_code'), types.InlineKeyboardButton("📷 Сдать по QR", callback_data='sell_qr'), types.InlineKeyboardButton("◀️ Назад", callback_data='back_to_menu'))
+    text = (
+        "╭━━━━━━━━━━━━━━━━━━╮\n"
+        "│  📱 **СДАЧА НОМЕРА**  │\n"
+        "╰━━━━━━━━━━━━━━━━━━╯\n\n"
+        "🔹 **По коду** — ${:.2f}\n"
+        "└─ Получите SMS с кодом\n\n"
+        "🔹 **По QR** — ${:.2f}\n"
+        "└─ Отсканируйте QR-код\n\n"
+        "💎 Вознаграждение до ${:.2f}"
+    ).format(code_price, qr_price, max(code_price,qr_price))
+    try: bot.edit_message_text(text, message.chat.id, message.message_id, parse_mode='Markdown', reply_markup=markup)
+    except: bot.send_message(message.chat.id, text, parse_mode='Markdown', reply_markup=markup)
+
+def start_code_sell(message):
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("◀️ Назад", callback_data='back_to_sell'))
+    text = (
+        "╭━━━━━━━━━━━━━━━━━━╮\n"
+        "│  📱 **СДАЧА ПО КОДУ** │\n"
+        "╰━━━━━━━━━━━━━━━━━━╯\n\n"
+        "📝 Отправьте номер телефона\n"
+        "в формате: `+79XXXXXXXXX`\n\n"
+        "⚠️ Только российские номера\n"
+        "📨 Ожидайте SMS с кодом"
+    )
+    try: msg = bot.edit_message_text(text, message.chat.id, message.message_id, parse_mode='Markdown', reply_markup=markup)
+    except: msg = bot.send_message(message.chat.id, text, parse_mode='Markdown', reply_markup=markup)
+    bot.register_next_step_handler(msg, process_phone_number)
+
+def process_phone_number(message):
+    if message.text == '/start': show_main_menu(message.chat.id); return
+    phone = message.text.strip()
+    if not re.match(r'^\+79\d{9}$', phone):
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        markup.add(types.InlineKeyboardButton("🔄 Попробовать снова", callback_data='sell_code'), types.InlineKeyboardButton("◀️ В меню", callback_data='back_to_menu'))
+        bot.send_message(message.chat.id,
+            "❌ **Неверный формат**\n\n"
+            "📝 Отправьте номер: `+79XXXXXXXXX`\n"
+            "💡 Пример: `+79123456789`",
+            parse_mode='Markdown', reply_markup=markup)
+        return
+    code_price = float(get_setting('code_price','4.00'))
+    success, msg = add_to_queue(message.from_user.id, 'code', phone)
+    if success:
+        position = get_queue_position(message.from_user.id, 'code')
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("◀️ В меню", callback_data='back_to_menu'))
+        bot.send_message(message.chat.id,
+            "✅ **Номер принят!**\n\n"
+            f"📱 `{phone}`\n"
+            f"📍 Позиция в очереди: **{position}**\n"
+            f"💰 Оплата: **${code_price:.2f}**\n\n"
+            "📨 Номер передан обработчику\n"
+            "⏱ Ожидайте код подтверждения",
+            parse_mode='Markdown', reply_markup=markup)
+        send_to_group(
+            f"🔔 **НОВЫЙ НОМЕР**\n\n"
+            f"📱 `{phone}`\n"
+            f"👤 @{message.from_user.username or 'Нет'}\n"
+            f"📍 Позиция: {position}\n\n"
+            f"/akk — взять в работу")
+    else:
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("◀️ В меню", callback_data='back_to_menu'))
+        bot.send_message(message.chat.id, f"❌ {msg}", parse_mode='Markdown', reply_markup=markup)
+
+def start_qr_sell(message):
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(types.InlineKeyboardButton("✅ Подтверждаю", callback_data='confirm_qr'), types.InlineKeyboardButton("❌ Отмена", callback_data='back_to_sell'))
+    text = (
+        "╭━━━━━━━━━━━━━━━━━━╮\n"
+        "│  📷 **СДАЧА ПО QR**   │\n"
+        "╰━━━━━━━━━━━━━━━━━━╯\n\n"
+        "🔐 Создать заявку на\n"
+        "авторизацию по QR-коду?\n\n"
+        "⚡ Быстро и безопасно!"
+    )
+    try: bot.edit_message_text(text, message.chat.id, message.message_id, parse_mode='Markdown', reply_markup=markup)
+    except: bot.send_message(message.chat.id, text, parse_mode='Markdown', reply_markup=markup)
+
+def confirm_qr_sell(call):
+    success, msg = add_to_queue(call.from_user.id, 'qr')
+    if success:
+        position = get_queue_position(call.from_user.id, 'qr')
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("◀️ В меню", callback_data='back_to_menu'))
+        try: bot.edit_message_text(
+            "✅ **Заявка создана**\n\n"
+            f"📍 Позиция в очереди: **{position}**\n\n"
+            "📷 Ожидайте QR-код\n"
+            "⏱ Скоро вам отправят",
+            call.message.chat.id, call.message.message_id, parse_mode='Markdown', reply_markup=markup)
+        except: bot.send_message(call.message.chat.id,
+            f"✅ **Заявка создана**\n\n📍 Позиция: **{position}**\n\n📷 Ожидайте QR-код",
+            parse_mode='Markdown', reply_markup=markup)
+        send_to_group(
+            f"🔔 **НОВЫЙ QR**\n\n"
+            f"👤 @{call.from_user.username or 'Нет'}\n"
+            f"📍 Позиция: {position}\n\n"
+            f"/akk — взять в работу")
+    else:
+        bot.answer_callback_query(call.id, msg, show_alert=True)
+
+def show_profile(message):
+    conn = sqlite3.connect('max_bot.db')
+    c = conn.cursor()
+    c.execute('SELECT * FROM users WHERE user_id=?', (message.chat.id,))
+    user = c.fetchone()
+    if not user: show_main_menu(message.chat.id, message.message_id); conn.close(); return
+    c.execute('SELECT COUNT(*) as t, SUM(CASE WHEN status="completed" THEN 1 ELSE 0 END) as ok, SUM(CASE WHEN status="failed" THEN 1 ELSE 0 END) as fl, SUM(CASE WHEN status IN ("taken","waiting") THEN 1 ELSE 0 END) as ip FROM code_queue WHERE user_id=?', (message.chat.id,))
+    cs = c.fetchone()
+    c.execute('SELECT COUNT(*) as t, SUM(CASE WHEN status="completed" THEN 1 ELSE 0 END) as ok, SUM(CASE WHEN status="failed" THEN 1 ELSE 0 END) as fl, SUM(CASE WHEN status IN ("taken","waiting") THEN 1 ELSE 0 END) as ip FROM qr_queue WHERE user_id=?', (message.chat.id,))
+    qs = c.fetchone()
+    total = (cs[0] or 0) + (qs[0] or 0)
+    ok = (cs[1] or 0) + (qs[1] or 0)
+    fl = (cs[2] or 0) + (qs[2] or 0)
+    ip = (cs[3] or 0) + (qs[3] or 0)
+    rate = (ok/total*100) if total > 0 else 0
+    c.execute('SELECT amount, description FROM transactions WHERE user_id=? ORDER BY created_at DESC LIMIT 1', (message.chat.id,))
+    lt = c.fetchone()
+    c.execute('SELECT COUNT(*) FROM withdraw_requests WHERE user_id=? AND status="pending"', (message.chat.id,))
+    pw = c.fetchone()[0]
+    conn.close()
+    text = (
+        "╭━━━━━━━━━━━━━━━━━━╮\n"
+        "│  👤 **МОЙ ПРОФИЛЬ**   │\n"
+        "╰━━━━━━━━━━━━━━━━━━╯\n\n"
+        "📱 **Информация**\n"
+        f"├─ 🆔 ID: `{user[0]}`\n"
+        f"├─ 👤 @{user[1] or 'Не указан'}\n"
+        f"└─ {'🟢 В работе' if ip > 0 else '⚪ Ожидание'}\n\n"
+        "💰 **Финансы**\n"
+        f"├─ 💎 Баланс: **${user[2]:.2f}**\n"
+        f"├─ 🔒 В холде: ${user[4]:.2f}\n"
+        f"├─ 💵 Заработано: ${user[3]:.2f}\n"
+        f"└─ 💳 Выведено: ${user[5]:.2f}\n\n"
+        "📊 **Статистика**\n"
+        f"├─ 📝 Всего: {total}\n"
+        f"├─ ✅ Успешно: {ok} ({rate:.0f}%)\n"
+        f"├─ ⏳ В работе: {ip}\n"
+        f"└─ ❌ Отменено: {fl}"
+    )
+    if lt: text += f"\n\n💼 **Последняя операция**\n└─ {lt[1]}: ${lt[0]:.2f}"
+    if pw > 0: text += f"\n\n⚠️ Заявок на вывод: {pw}"
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    if user[2] > 0: markup.add(types.InlineKeyboardButton("💳 Вывести средства", callback_data='withdraw'))
+    markup.add(types.InlineKeyboardButton("◀️ В меню", callback_data='back_to_menu'))
+    try: bot.edit_message_text(text, message.chat.id, message.message_id, parse_mode='Markdown', reply_markup=markup)
+    except: bot.send_message(message.chat.id, text, parse_mode='Markdown', reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data == 'instruction')
+def show_instruction(call):
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("◀️ Назад", callback_data='back_to_menu'))
+    text = (
+        "╭━━━━━━━━━━━━━━━━━━╮\n"
+        "│  📖 **ИНСТРУКЦИЯ**   │\n"
+        "╰━━━━━━━━━━━━━━━━━━╯\n\n"
+        "1️⃣ Подпишитесь на канал\n"
+        "2️⃣ Нажмите «Сдать Max»\n"
+        "3️⃣ Выберите способ сдачи\n"
+        "4️⃣ Следуйте инструкциям\n"
+        "5️⃣ Получите оплату 💰\n\n"
+        "⚡ Среднее время: 5-15 мин"
+    )
+    try: bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode='Markdown', reply_markup=markup)
+    except: bot.send_message(call.message.chat.id, text, parse_mode='Markdown', reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data == 'support')
+def show_support(call):
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("◀️ Назад", callback_data='back_to_menu'))
+    text = (
+        "╭━━━━━━━━━━━━━━━━━━╮\n"
+        "│  🆘 **ПОДДЕРЖКА**    │\n"
+        "╰━━━━━━━━━━━━━━━━━━╯\n\n"
+        f"📞 Связь с администрацией:\n"
+        f"• {SUPPORT_USERNAME}\n"
+        f"• Чат: {CHAT_LINK}\n\n"
+        f"⏰ Режим работы:\n"
+        f"{WORK_HOURS}"
+    )
+    try: bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode='Markdown', reply_markup=markup)
+    except: bot.send_message(call.message.chat.id, text, parse_mode='Markdown', reply_markup=markup)
+
+@bot.message_handler(commands=['akk'])
+def akk_command(message):
+    if message.chat.id != GROUP_ID: bot.reply_to(message, "❌ Команда только для рабочей группы"); return
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(types.InlineKeyboardButton("📱 Код", callback_data='get_code'), types.InlineKeyboardButton("📷 QR", callback_data='get_qr'))
+    bot.send_message(message.chat.id,
+        "🔍 **ВЫБЕРИТЕ ТИП ЗАЯВКИ**\n\n"
+        "📱 Код — номер и SMS\n"
+        "📷 QR — заявка и фото",
+        parse_mode='Markdown', reply_markup=markup,
+        message_thread_id=message.message_thread_id if message.is_topic_message else None)
+
+def get_next_code(call):
+    conn = sqlite3.connect('max_bot.db')
+    c = conn.cursor()
+    c.execute('SELECT id, user_id, phone_number FROM code_queue WHERE status="waiting" ORDER BY id ASC LIMIT 1')
+    code = c.fetchone()
+    if code:
+        thread_id = call.message.message_thread_id if hasattr(call.message, 'message_thread_id') else None
+        c.execute('UPDATE code_queue SET status="taken", taken_by=?, taken_at=CURRENT_TIMESTAMP WHERE id=?', (call.from_user.id, code[0]))
+        conn.commit()
+        if not hasattr(bot, 'order_threads'): bot.order_threads = {}
+        bot.order_threads[code[0]] = thread_id
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        markup.add(types.InlineKeyboardButton("📤 Отправил код", callback_data=f'send_code_{code[0]}'), types.InlineKeyboardButton("⏭ Пропустить", callback_data=f'skip_code_{code[0]}'))
+        bot.edit_message_text(
+            f"📱 **ЗАЯВКА #{code[0]}**\n\n"
+            f"Номер: `{code[2]}`\n\n"
+            f"1️⃣ Отправьте код на номер\n"
+            f"2️⃣ Нажмите «Отправил код»\n"
+            f"3️⃣ Пользователь введет код",
+            call.message.chat.id, call.message.message_id, parse_mode='Markdown', reply_markup=markup)
+        try: bot.send_message(code[1], "📨 **Номер взят в работу**\n\nОжидайте SMS с кодом\n⏱ 5-10 минут", parse_mode='Markdown')
+        except: pass
+    else: bot.answer_callback_query(call.id, "❌ Нет номеров в очереди", show_alert=True)
+    conn.close()
+
+def handle_send_code(call):
+    oid = int(call.data.split('_')[2])
+    conn = sqlite3.connect('max_bot.db')
+    c = conn.cursor()
+    c.execute('SELECT user_id, phone_number FROM code_queue WHERE id=?', (oid,))
+    order = c.fetchone()
+    if order:
+        thread_id = call.message.message_thread_id if hasattr(call.message, 'message_thread_id') else None
+        if not hasattr(bot, 'order_threads'): bot.order_threads = {}
+        bot.order_threads[oid] = thread_id
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        markup.add(types.InlineKeyboardButton("🔢 Ввести код", callback_data=f'enter_code_{oid}'), types.InlineKeyboardButton("🔄 Повтор", callback_data=f'resend_code_{oid}'))
+        try: bot.send_message(order[0],
+            f"🔑 **ВВЕДИТЕ КОД**\n\n"
+            f"📱 Номер: `{order[1]}`\n\n"
+            f"📨 Код отправлен в SMS\n"
+            f"👇 Нажмите кнопку чтобы ввести код\n\n"
+            f"🔄 Не пришел код? Запросите повтор",
+            parse_mode='Markdown', reply_markup=markup)
+        except: pass
+        bot.answer_callback_query(call.id, "✅ Запрос отправлен!")
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        markup.add(types.InlineKeyboardButton("⏳ Ожидание ввода кода...", callback_data='waiting'), types.InlineKeyboardButton("⏭ Пропустить", callback_data=f'skip_code_{oid}'))
+        bot.edit_message_text(
+            f"⏳ **ОЖИДАНИЕ КОДА**\n\n"
+            f"📱 `{order[1]}`\n"
+            f"📋 #{oid}\n\n"
+            f"Пользователь вводит код\n\n"
+            f"⏭ Нажмите «Пропустить» если код не приходит",
+            call.message.chat.id, call.message.message_id, parse_mode='Markdown', reply_markup=markup)
+    else: bot.answer_callback_query(call.id, "❌ Не найдена", show_alert=True)
+    conn.close()
+
+def handle_enter_code_request(call):
+    oid = int(call.data.split('_')[2])
+    user_states[call.from_user.id] = {'state': 'waiting_code', 'order_id': oid}
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("❌ Отмена", callback_data='back_to_menu'))
+    bot.edit_message_text(
+        "🔢 **ВВОД КОДА**\n\n"
+        "📨 Введите код из SMS\n"
+        "📝 Строго 6 цифр\n"
+        "💡 Пример: `123456`",
+        call.message.chat.id, call.message.message_id, parse_mode='Markdown', reply_markup=markup)
+
+@bot.message_handler(func=lambda m: user_states.get(m.from_user.id,{}).get('state')=='waiting_code')
+def process_code_input(message):
+    code = message.text.strip()
+    if not re.match(r'^\d{6}$', code):
+        bot.reply_to(message,
+            "❌ **Неверный формат**\n\n"
+            "📝 Код должен содержать строго 6 цифр\n"
+            "💡 Пример: `123456`\n\n"
+            "🔄 Отправьте код еще раз",
+            parse_mode='Markdown')
+        return
+    us = user_states[message.from_user.id]
+    oid = us['order_id']
+    del user_states[message.from_user.id]
+    conn = sqlite3.connect('max_bot.db')
+    c = conn.cursor()
+    c.execute('UPDATE code_queue SET code_value=?, code_sent=1 WHERE id=?', (code, oid))
+    c.execute('SELECT taken_by, phone_number FROM code_queue WHERE id=?', (oid,))
+    order = c.fetchone()
+    conn.commit()
+    conn.close()
+    if order and order[0]:
+        thread_id = None
+        if hasattr(bot, 'order_threads') and oid in bot.order_threads: thread_id = bot.order_threads[oid]
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        markup.add(types.InlineKeyboardButton("✅ Встал", callback_data=f'code_success_{oid}'), types.InlineKeyboardButton("🔐 Пароль", callback_data=f'code_password_{oid}'))
+        send_to_group(
+            f"🔑 **ПОЛУЧЕН КОД**\n\n"
+            f"📱 `{order[1]}`\n"
+            f"🔢 Код: `{code}`\n"
+            f"📋 #{oid}\n\n"
+            f"✅ Встал — вход выполнен\n"
+            f"🔐 Пароль — запрос пароля",
+            markup=markup, thread_id=thread_id)
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("◀️ В меню", callback_data='back_to_menu'))
+        bot.send_message(message.chat.id,
+            "✅ **Код отправлен!**\n\n"
+            "📨 Обработчик получил код\n"
+            "⏱ Ожидайте подтверждение...",
+            parse_mode='Markdown', reply_markup=markup)
+    else: bot.send_message(message.chat.id, "❌ Ошибка. Обратитесь в поддержку")
+
+def handle_code_success(call):
+    oid = int(call.data.split('_')[2])
+    thread_id = call.message.message_thread_id if hasattr(call.message, 'message_thread_id') else None
+    conn = sqlite3.connect('max_bot.db')
+    c = conn.cursor()
+    c.execute('SELECT user_id, phone_number FROM code_queue WHERE id=?', (oid,))
+    order = c.fetchone()
+    if order:
+        price = float(get_setting('code_price','4.00'))
+        ht = int(get_setting('hold_time','300'))
+        c.execute('UPDATE code_queue SET status="completed", completed_at=CURRENT_TIMESTAMP WHERE id=?', (oid,))
+        c.execute('UPDATE users SET total_orders=total_orders+1 WHERE user_id=?', (order[0],))
+        conn.commit()
+        conn.close()
+        try: bot.send_message(order[0],
+            f"🎉 **НОМЕР УСПЕШНО ВСТАЛ!**\n\n"
+            f"📱 `{order[1]}`\n"
+            f"✅ Статус: Подтверждено\n\n"
+            f"💰 Начисление: **${price:.2f}**\n"
+            f"⏱ Холд: {ht//60} мин\n\n"
+            f"💎 Средства поступят через {ht//60} минут",
+            parse_mode='Markdown')
+        except: pass
+        timer = threading.Timer(ht, process_hold_payment, args=[order[0], oid, price, 'code'])
+        timer.start()
+        if not hasattr(bot, 'hold_timers'): bot.hold_timers = {}
+        bot.hold_timers[f'code_{oid}'] = {'timer': timer, 'user_id': order[0], 'amount': price}
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("❌ Слетел", callback_data=f'code_failed_{oid}'))
+        notification_text = f"✅ **ПОДТВЕРЖДЕНО**\n\n📱 Номер `{order[1]}` успешно встал"
+        if thread_id: send_to_group(notification_text, markup=markup, thread_id=thread_id)
+        else:
+            try: bot.edit_message_text(notification_text, call.message.chat.id, call.message.message_id, parse_mode='Markdown', reply_markup=markup)
+            except: send_to_group(notification_text, markup=markup)
+        bot.answer_callback_query(call.id, "✅ Подтверждено")
+    else: bot.answer_callback_query(call.id, "❌ Заявка не найдена", show_alert=True)
+
+def handle_code_failed(call):
+    oid = int(call.data.split('_')[2])
+    if hasattr(bot, 'hold_timers') and f'code_{oid}' in bot.hold_timers:
+        bot.hold_timers[f'code_{oid}']['timer'].cancel()
+        del bot.hold_timers[f'code_{oid}']
+    conn = sqlite3.connect('max_bot.db')
+    c = conn.cursor()
+    c.execute('SELECT user_id, phone_number FROM code_queue WHERE id=?', (oid,))
+    order = c.fetchone()
+    if order:
+        c.execute('UPDATE code_queue SET status="failed", failed_at=CURRENT_TIMESTAMP WHERE id=?', (oid,))
+        conn.commit()
+        conn.close()
+        try: bot.send_message(order[0],
+            f"❌ **НОМЕР СЛЕТЕЛ**\n\n"
+            f"📱 `{order[1]}`\n\n"
+            f"⚠️ Номер не удержался\n"
+            f"💰 Начисление отменено\n\n"
+            f"🔄 Попробуйте другой номер",
+            parse_mode='Markdown')
+        except: pass
+        bot.edit_message_text(f"❌ **СЛЕТЕЛ**\n\n📱 Номер `{order[1]}` слетел", call.message.chat.id, call.message.message_id, parse_mode='Markdown')
+        bot.answer_callback_query(call.id, "❌ Слетел")
+    else: bot.answer_callback_query(call.id, "❌ Не найдена", show_alert=True)
+
+def handle_skip_code(call):
+    oid = int(call.data.split('_')[2])
+    conn = sqlite3.connect('max_bot.db')
+    c = conn.cursor()
+    c.execute('SELECT user_id, phone_number FROM code_queue WHERE id=?', (oid,))
+    order = c.fetchone()
+    if order:
+        c.execute('UPDATE code_queue SET status="problem", problem_at=CURRENT_TIMESTAMP WHERE id=?', (oid,))
+        conn.commit()
+        conn.close()
+        try: bot.send_message(order[0],
+            f"⚠️ **ПРОБЛЕМА С НОМЕРОМ**\n\n"
+            f"📱 `{order[1]}`\n\n"
+            f"❌ Номер заблокирован или много попыток\n"
+            f"🔄 Попробуйте другой номер",
+            parse_mode='Markdown')
+        except: pass
+        bot.edit_message_text(f"⏭ **ПРОПУЩЕН**\n\n📱 Номер `{order[1]}` пропущен", call.message.chat.id, call.message.message_id, parse_mode='Markdown')
+        bot.answer_callback_query(call.id, "⏭ Пропущен")
+    else: bot.answer_callback_query(call.id, "❌ Не найдена", show_alert=True)
+
+def handle_code_password(call):
+    oid = int(call.data.split('_')[2])
+    conn = sqlite3.connect('max_bot.db')
+    c = conn.cursor()
+    c.execute('SELECT user_id, phone_number FROM code_queue WHERE id=?', (oid,))
+    order = c.fetchone()
+    conn.close()
+    if order:
+        thread_id = call.message.message_thread_id if hasattr(call.message, 'message_thread_id') else None
+        try:
+            bot.send_message(order[0],
+                f"🔐 **ЗАПРОС ПАРОЛЯ**\n\n"
+                f"📱 `{order[1]}`\n"
+                f"🔒 Отправьте пароль ответным сообщением",
+                parse_mode='Markdown')
+            user_states[order[0]] = {'state': 'waiting_password', 'order_id': oid, 'phone': order[1], 'thread_id': thread_id}
+        except: pass
+        bot.edit_message_text(f"🔐 **ЗАПРОШЕН ПАРОЛЬ**\n\n📱 `{order[1]}`\n📋 #{oid}\n\n⏱ Ожидание...", call.message.chat.id, call.message.message_id, parse_mode='Markdown')
+        bot.answer_callback_query(call.id, "🔐 Запрошен")
+    else: bot.answer_callback_query(call.id, "❌ Не найдена", show_alert=True)
+
+@bot.message_handler(func=lambda m: user_states.get(m.from_user.id,{}).get('state')=='waiting_password')
+def process_password(message):
+    pw = message.text.strip()
+    us = user_states[message.from_user.id]
+    oid = us['order_id']
+    phone = us['phone']
+    thread_id = us.get('thread_id')
+    del user_states[message.from_user.id]
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(types.InlineKeyboardButton("✅ Встал", callback_data=f'code_success_{oid}'), types.InlineKeyboardButton("⏭ Пропустить", callback_data=f'skip_code_{oid}'))
+    send_to_group(
+        f"🔐 **ПОЛУЧЕН ПАРОЛЬ**\n\n"
+        f"📱 `{phone}`\n"
+        f"🔑 `{pw}`\n"
+        f"📋 #{oid}\n\n"
+        f"✅ Встал — вход выполнен\n"
+        f"⏭ Пропустить — проблема",
+        markup=markup, thread_id=thread_id)
+    bot.send_message(message.chat.id, "✅ **Пароль отправлен обработчику**\n\n⏱ Ожидайте подтверждение...", parse_mode='Markdown')
+
+def get_next_qr(call):
+    conn = sqlite3.connect('max_bot.db')
+    c = conn.cursor()
+    c.execute('SELECT id, user_id FROM qr_queue WHERE status="waiting" ORDER BY id ASC LIMIT 1')
+    qr = c.fetchone()
+    if qr:
+        thread_id = call.message.message_thread_id if hasattr(call.message, 'message_thread_id') else None
+        c.execute('UPDATE qr_queue SET status="taken", taken_by=?, taken_at=CURRENT_TIMESTAMP WHERE id=?', (call.from_user.id, qr[0]))
+        conn.commit()
+        if not hasattr(bot, 'order_threads'): bot.order_threads = {}
+        bot.order_threads[qr[0]] = thread_id
+        user_states[call.from_user.id] = {'state': 'waiting_qr_photo', 'qr_id': qr[0], 'user_id': qr[1]}
+        bot.edit_message_text(
+            f"📷 **QR ЗАЯВКА #{qr[0]}**\n\n"
+            f"👤 Пользователь: {qr[1]}\n\n"
+            f"📸 Отправьте фото QR-кода\n"
+            f"📎 **ОТВЕТОМ** на это сообщение",
+            call.message.chat.id, call.message.message_id, parse_mode='Markdown')
+        try: bot.send_message(qr[1], "📷 **QR в обработке**\n\nСкоро вам отправят QR-код", parse_mode='Markdown')
+        except: pass
+    else: bot.answer_callback_query(call.id, "❌ Нет доступных QR", show_alert=True)
+    conn.close()
+
+@bot.message_handler(content_types=['photo'])
+def handle_qr_photo(message):
+    if message.chat.id == GROUP_ID and message.reply_to_message:
+        us = user_states.get(message.from_user.id)
+        if us and us.get('state') == 'waiting_qr_photo':
+            qr_id = us['qr_id']
+            user_id = us['user_id']
+            file_id = message.photo[-1].file_id
+            conn = sqlite3.connect('max_bot.db')
+            c = conn.cursor()
+            c.execute('UPDATE qr_queue SET qr_sent=1, qr_file_id=?, qr_message_id=? WHERE id=?', (file_id, message.message_id, qr_id))
+            conn.commit()
+            conn.close()
+            markup = types.InlineKeyboardMarkup(row_width=2)
+            markup.add(types.InlineKeyboardButton("✅ Отсканировал", callback_data=f'scanned_{qr_id}'), types.InlineKeyboardButton("❌ Отменить", callback_data=f'cancel_qr_{qr_id}'))
+            try: bot.send_photo(user_id, file_id,
+                caption="📷 **QR-КОД**\n\n"
+                       "🔐 Отсканируйте в приложении Max\n"
+                       "👇 Нажмите «Отсканировал» после",
+                parse_mode='Markdown', reply_markup=markup)
+            except: bot.reply_to(message, "❌ Ошибка отправки"); return
+            bot.reply_to(message, f"✅ **QR ПЕРЕДАН**\n\n📋 #{qr_id}\n👤 {user_id}\n\nОжидайте сканирование", parse_mode='Markdown')
+            del user_states[message.from_user.id]
+
+def handle_qr_scanned(call):
+    qr_id = int(call.data.split('_')[1])
+    conn = sqlite3.connect('max_bot.db')
+    c = conn.cursor()
+    c.execute('SELECT id, taken_by, user_id FROM qr_queue WHERE id=? AND status="taken"', (qr_id,))
+    qr = c.fetchone()
+    if qr:
+        thread_id = None
+        if hasattr(bot, 'order_threads') and qr_id in bot.order_threads: thread_id = bot.order_threads[qr_id]
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        markup.add(types.InlineKeyboardButton("✅ Встал", callback_data=f'qr_success_{qr_id}'), types.InlineKeyboardButton("🔐 Пароль", callback_data=f'qr_password_{qr_id}'))
+        send_to_group(
+            f"✅ **QR ОТСКАНИРОВАН**\n\n"
+            f"📋 #{qr_id}\n"
+            f"👤 {qr[2]}\n\n"
+            f"✅ Встал — успешный вход\n"
+            f"🔐 Пароль — запрос пароля",
+            markup=markup, thread_id=thread_id)
+        try: bot.edit_message_caption("✅ **QR ОТСКАНИРОВАН**\n\n🎉 Подтверждено!\n⏱ Ожидайте подтверждение...", call.message.chat.id, call.message.message_id, parse_mode='Markdown', reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("⏳ Ожидание", callback_data='waiting')))
+        except: bot.send_message(call.message.chat.id, "✅ **QR Отсканирован**\n\nОжидайте подтверждение...", parse_mode='Markdown')
+        bot.answer_callback_query(call.id, "✅ Подтверждено!")
+    else: bot.answer_callback_query(call.id, "❌ Не найдена", show_alert=True)
+    conn.close()
+
+def handle_qr_success(call):
+    qr_id = int(call.data.split('_')[2])
+    thread_id = call.message.message_thread_id if hasattr(call.message, 'message_thread_id') else None
+    conn = sqlite3.connect('max_bot.db')
+    c = conn.cursor()
+    c.execute('SELECT user_id FROM qr_queue WHERE id=?', (qr_id,))
+    qr = c.fetchone()
+    if qr:
+        price = float(get_setting('qr_price','4.00'))
+        ht = int(get_setting('hold_time','300'))
+        c.execute('UPDATE qr_queue SET status="completed", completed=1, completed_at=CURRENT_TIMESTAMP WHERE id=?', (qr_id,))
+        c.execute('UPDATE users SET total_orders=total_orders+1 WHERE user_id=?', (qr[0],))
+        conn.commit()
+        conn.close()
+        try: bot.send_message(qr[0],
+            f"🎉 **QR УСПЕШНО ПРИНЯТ!**\n\n"
+            f"📷 QR-код\n"
+            f"✅ Вход подтвержден!\n\n"
+            f"💰 Начисление: **${price:.2f}**\n"
+            f"⏱ Холд: {ht//60} мин\n\n"
+            f"💎 Средства поступят через {ht//60} минут",
+            parse_mode='Markdown')
+        except: pass
+        timer = threading.Timer(ht, process_hold_payment, args=[qr[0], qr_id, price, 'qr'])
+        timer.start()
+        if not hasattr(bot, 'hold_timers'): bot.hold_timers = {}
+        bot.hold_timers[f'qr_{qr_id}'] = {'timer': timer, 'user_id': qr[0], 'amount': price}
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("❌ Слетел", callback_data=f'qr_failed_{qr_id}'))
+        notification_text = f"✅ **ПОДТВЕРЖДЕНО**\n\n📷 QR-код успешно принят"
+        if thread_id: send_to_group(notification_text, markup=markup, thread_id=thread_id)
+        else:
+            try: bot.edit_message_text(notification_text, call.message.chat.id, call.message.message_id, parse_mode='Markdown', reply_markup=markup)
+            except: send_to_group(notification_text, markup=markup)
+        bot.answer_callback_query(call.id, "✅ Подтверждено")
+    else: bot.answer_callback_query(call.id, "❌ Не найдена", show_alert=True)
+
+def handle_qr_failed(call):
+    qr_id = int(call.data.split('_')[2])
+    if hasattr(bot, 'hold_timers') and f'qr_{qr_id}' in bot.hold_timers:
+        bot.hold_timers[f'qr_{qr_id}']['timer'].cancel()
+        del bot.hold_timers[f'qr_{qr_id}']
+    conn = sqlite3.connect('max_bot.db')
+    c = conn.cursor()
+    c.execute('SELECT user_id FROM qr_queue WHERE id=?', (qr_id,))
+    qr = c.fetchone()
+    if qr:
+        c.execute('UPDATE qr_queue SET status="failed", completed=0, failed_at=CURRENT_TIMESTAMP WHERE id=?', (qr_id,))
+        conn.commit()
+        conn.close()
+        try: bot.send_message(qr[0],
+            "❌ **QR СЛЕТЕЛ**\n\n"
+            "⚠️ Вход не удержался\n"
+            "💰 Начисление отменено\n\n"
+            "🔄 Попробуйте другой QR",
+            parse_mode='Markdown')
+        except: pass
+        bot.edit_message_text(f"❌ **СЛЕТЕЛ**\n\n📷 QR-код слетел", call.message.chat.id, call.message.message_id, parse_mode='Markdown')
+        bot.answer_callback_query(call.id, "❌ Слетел")
+    else: bot.answer_callback_query(call.id, "❌ Не найдена", show_alert=True)
+
+def handle_qr_password(call):
+    qr_id = int(call.data.split('_')[2])
+    conn = sqlite3.connect('max_bot.db')
+    c = conn.cursor()
+    c.execute('SELECT user_id FROM qr_queue WHERE id=?', (qr_id,))
+    qr = c.fetchone()
+    conn.close()
+    if qr:
+        thread_id = call.message.message_thread_id if hasattr(call.message, 'message_thread_id') else None
+        try:
+            bot.send_message(qr[0],
+                "🔐 **ЗАПРОС ПАРОЛЯ**\n\n"
+                "🔒 На аккаунте установлен пароль\n"
+                "Отправьте пароль ответным сообщением",
+                parse_mode='Markdown')
+            user_states[qr[0]] = {'state': 'waiting_qr_password', 'qr_id': qr_id, 'thread_id': thread_id}
+        except: pass
+        bot.edit_message_text(f"🔐 **ЗАПРОШЕН ПАРОЛЬ**\n\n📋 #{qr_id}\n\n⏱ Ожидание...", call.message.chat.id, call.message.message_id, parse_mode='Markdown')
+        bot.answer_callback_query(call.id, "🔐 Запрошен")
+    else: bot.answer_callback_query(call.id, "❌ Не найдена", show_alert=True)
+
+@bot.message_handler(func=lambda m: user_states.get(m.from_user.id,{}).get('state')=='waiting_qr_password')
+def process_qr_password(message):
+    pw = message.text.strip()
+    us = user_states[message.from_user.id]
+    qr_id = us['qr_id']
+    thread_id = us.get('thread_id')
+    del user_states[message.from_user.id]
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(types.InlineKeyboardButton("✅ Встал", callback_data=f'qr_success_{qr_id}'), types.InlineKeyboardButton("⏭ Пропустить", callback_data=f'skip_qr_{qr_id}'))
+    send_to_group(
+        f"🔐 **ПОЛУЧЕН ПАРОЛЬ QR**\n\n"
+        f"🔑 `{pw}`\n"
+        f"📋 #{qr_id}\n\n"
+        f"✅ Встал — вход выполнен\n"
+        f"⏭ Пропустить — проблема",
+        markup=markup, thread_id=thread_id)
+    bot.send_message(message.chat.id, "✅ **Пароль отправлен обработчику**\n\n⏱ Ожидайте подтверждение...", parse_mode='Markdown')
+
+def process_hold_payment(user_id, order_id, amount, order_type='code'):
+    try:
+        logger.info(f"🕐 Холд завершен! Начисление ${amount} пользователю {user_id} за заказ #{order_id}")
+        conn = sqlite3.connect('max_bot.db')
+        c = conn.cursor()
+        if order_type == 'code': c.execute('SELECT status, phone_number FROM code_queue WHERE id=?', (order_id,))
+        else: c.execute('SELECT status, completed FROM qr_queue WHERE id=?', (order_id,))
+        order = c.fetchone()
+        if not order: logger.error(f"❌ Заявка #{order_id} не найдена"); conn.close(); return
+        status = order[0]
+        is_completed = (status == 'completed' and (order_type == 'code' or (len(order) > 1 and order[1] == 1)))
+        if is_completed:
+            c.execute('UPDATE users SET balance=balance+?, total_earned=total_earned+? WHERE user_id=?', (amount, amount, user_id))
+            if order_type == 'code' and len(order) > 1 and order[1]: desc = f'📱 {order[1]} — ${amount:.2f}'
+            else: desc = f'📷 QR-код — ${amount:.2f}'
+            c.execute('INSERT INTO transactions (user_id, amount, type, description) VALUES (?,?,"income",?)', (user_id, amount, desc))
+            c.execute('UPDATE users SET success_orders=success_orders+1 WHERE user_id=?', (user_id,))
+            conn.commit()
+            c.execute('SELECT balance FROM users WHERE user_id=?', (user_id,))
+            new_balance = c.fetchone()[0]
+            if order_type == 'code' and len(order) > 1 and order[1]: text = f"💰 **СРЕДСТВА ЗАЧИСЛЕНЫ**\n\n📱 Номер: `{order[1]}`\n💵 Сумма: **${amount:.2f}**\n💎 Баланс: **${new_balance:.2f}**\n\n✅ Холд завершен"
+            else: text = f"💰 **СРЕДСТВА ЗАЧИСЛЕНЫ**\n\n📷 QR-код\n💵 Сумма: **${amount:.2f}**\n💎 Баланс: **${new_balance:.2f}**\n\n✅ Холд завершен"
+            try: bot.send_message(user_id, text, parse_mode='Markdown')
+            except: pass
+        conn.close()
+    except Exception as e: logger.error(f"Ошибка начисления: {e}")
+
+@bot.callback_query_handler(func=lambda call: call.data == 'withdraw')
+def withdraw_request(call):
+    conn = sqlite3.connect('max_bot.db')
+    c = conn.cursor()
+    c.execute('SELECT balance FROM users WHERE user_id=?', (call.from_user.id,))
+    user = c.fetchone()
+    conn.close()
+    if not user or user[0] <= 0: bot.answer_callback_query(call.id, "❌ Недостаточно средств", show_alert=True); return
+    try: bot.edit_message_text(
+        f"💳 **ВЫВОД СРЕДСТВ**\n\n"
+        f"💰 Баланс: **${user[0]:.2f}**\n\n"
+        f"📝 Введите сумму\n"
+        f"💡 Максимум: ${user[0]:.2f}\n\n"
+        f"⚡ Комиссия 0% • Мгновенная обработка",
+        call.message.chat.id, call.message.message_id, parse_mode='Markdown',
+        reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("❌ Отмена", callback_data='profile')))
+    except: bot.send_message(call.message.chat.id,
+        f"💳 **ВЫВОД СРЕДСТВ**\n\n💰 Баланс: **${user[0]:.2f}**\n\n📝 Введите сумму",
+        parse_mode='Markdown',
+        reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("❌ Отмена", callback_data='profile')))
+    user_states[call.from_user.id] = {'state': 'waiting_withdraw_amount'}
+
+@bot.message_handler(func=lambda m: user_states.get(m.from_user.id,{}).get('state')=='waiting_withdraw_amount')
+def process_withdraw_amount(message):
+    try: amount = float(message.text.strip())
+    except: bot.reply_to(message, "❌ Введите число"); return
+    del user_states[message.from_user.id]
+    conn = sqlite3.connect('max_bot.db')
+    c = conn.cursor()
+    c.execute('SELECT balance, hold_balance FROM users WHERE user_id=?', (message.from_user.id,))
+    user = c.fetchone()
+    if not user: bot.send_message(message.chat.id, "❌ Ошибка"); conn.close(); return
+    avail = user[0] - user[1]
+    if amount < 1.0 or amount > avail: bot.send_message(message.chat.id, f"❌ Неверная сумма\n💰 Доступно: ${avail:.2f}"); conn.close(); return
+    c.execute('INSERT INTO withdraw_requests (user_id, amount, status) VALUES (?,?,"pending")', (message.from_user.id, amount))
+    c.execute('UPDATE users SET balance=balance-?, hold_balance=hold_balance+? WHERE user_id=?', (amount, amount, message.from_user.id))
+    wid = c.lastrowid
+    conn.commit()
+    conn.close()
+    bot.send_message(message.chat.id,
+        f"✅ **ЗАЯВКА СОЗДАНА**\n\n"
+        f"📋 Номер: #{wid}\n"
+        f"💳 Сумма: ${amount:.2f}\n"
+        f"📅 {datetime.now().strftime('%d.%m.%Y %H:%M')}\n\n"
+        f"⏱ Статус: Ожидает обработки\n"
+        f"👑 Администратор проверит заявку",
+        parse_mode='Markdown')
+    for aid in ADMIN_IDS:
+        try:
+            markup = types.InlineKeyboardMarkup()
+            markup.add(types.InlineKeyboardButton("✅ Выплатить", callback_data=f'process_withdraw_{wid}'))
+            bot.send_message(aid,
+                f"💰 **НОВАЯ ВЫПЛАТА**\n\n"
+                f"📋 #{wid}\n"
+                f"👤 @{message.from_user.username or 'Нет'}\n"
+                f"🆔 `{message.from_user.id}`\n"
+                f"💳 ${amount:.2f}",
+                parse_mode='Markdown', reply_markup=markup)
+        except: pass
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('process_withdraw_'))
+def admin_process_withdraw(call):
+    if not is_admin(call.from_user.id): bot.answer_callback_query(call.id, "❌ Нет доступа", show_alert=True); return
+    wid = int(call.data.split('_')[2])
+    user_states[call.from_user.id] = {'state': 'waiting_check_link', 'withdraw_id': wid}
+    bot.edit_message_text(f"💳 **ОТПРАВЬТЕ ЧЕК**\n\n📋 #{wid}\n\n📎 Отправьте ссылку на чек ответом", call.message.chat.id, call.message.message_id, parse_mode='Markdown')
+
+@bot.message_handler(func=lambda m: user_states.get(m.from_user.id,{}).get('state')=='waiting_check_link')
+def admin_send_check(message):
+    if not is_admin(message.from_user.id): return
+    us = user_states[message.from_user.id]
+    wid = us['withdraw_id']
+    link = message.text.strip()
+    del user_states[message.from_user.id]
+    if not link.startswith('http'): bot.reply_to(message, "❌ Отправьте ссылку"); user_states[message.from_user.id] = us; return
+    conn = sqlite3.connect('max_bot.db')
+    c = conn.cursor()
+    c.execute('SELECT user_id, amount FROM withdraw_requests WHERE id=? AND status="pending"', (wid,))
+    w = c.fetchone()
+    if not w: bot.reply_to(message, "❌ Не найдена"); conn.close(); return
+    c.execute('UPDATE withdraw_requests SET status="completed", admin_id=?, check_link=?, processed_at=CURRENT_TIMESTAMP WHERE id=?', (message.from_user.id, link, wid))
+    c.execute('UPDATE users SET hold_balance=hold_balance-?, total_withdrawn=total_withdrawn+? WHERE user_id=?', (w[1], w[1], w[0]))
+    c.execute('INSERT INTO transactions (user_id, amount, type, description) VALUES (?,?,"withdraw",?)', (w[0], w[1], f'Вывод #{wid}'))
+    conn.commit()
+    conn.close()
+    try: bot.send_message(w[0],
+        f"💰 **СРЕДСТВА ВЫВЕДЕНЫ**\n\n"
+        f"📋 #{wid}\n💳 ${w[1]:.2f}\n✅ Выплачено\n\n"
+        f"🔗 {link}",
+        parse_mode='Markdown', disable_web_page_preview=True)
+    except: pass
+    bot.reply_to(message, f"✅ Выплата #{wid} на ${w[1]:.2f}", parse_mode='Markdown')
+
+@bot.message_handler(commands=['admin'])
+def admin_command(message):
+    if not is_admin(message.from_user.id): bot.reply_to(message, "❌ Нет доступа"); return
+    code_price = float(get_setting('code_price','4.00'))
+    qr_price = float(get_setting('qr_price','4.00'))
+    ht = int(get_setting('hold_time','300'))
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(types.InlineKeyboardButton("📊 Статистика", callback_data='admin_stats'), types.InlineKeyboardButton("⚙️ Настройки", callback_data='admin_settings'), types.InlineKeyboardButton("💰 Выводы", callback_data='admin_withdrawals'), types.InlineKeyboardButton("🧹 Очистка", callback_data='admin_clear_queue'), types.InlineKeyboardButton("📢 Рассылка", callback_data='admin_broadcast'), types.InlineKeyboardButton("🔍 Поиск", callback_data='admin_search'))
+    bot.send_message(message.chat.id,
+        f"╭━━━━━━━━━━━━━━━━━━╮\n"
+        f"│  👑 **АДМИН-ПАНЕЛЬ** │\n"
+        f"╰━━━━━━━━━━━━━━━━━━╯\n\n"
+        f"👤 @{message.from_user.username}\n"
+        f"🕐 {datetime.now().strftime('%H:%M:%S')}\n\n"
+        f"💰 Код: ${code_price:.2f}\n"
+        f"📷 QR: ${qr_price:.2f}\n"
+        f"⏱ Холд: {ht//60} мин",
+        parse_mode='Markdown', reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data == 'admin_stats')
+def admin_stats(call):
+    if not is_admin(call.from_user.id): return
+    conn = sqlite3.connect('max_bot.db')
+    c = conn.cursor()
+    c.execute('SELECT COUNT(*) FROM users'); tu = c.fetchone()[0]
+    c.execute('SELECT COUNT(*) FROM users WHERE registration_date > datetime("now","-1 day")'); n24 = c.fetchone()[0]
+    c.execute('SELECT SUM(balance), SUM(total_earned), SUM(total_withdrawn) FROM users'); fin = c.fetchone()
+    c.execute('SELECT COUNT(*) FROM code_queue WHERE status="waiting"'); wc = c.fetchone()[0]
+    c.execute('SELECT COUNT(*) FROM qr_queue WHERE status="waiting"'); wq = c.fetchone()[0]
+    c.execute('SELECT COUNT(*), SUM(amount) FROM withdraw_requests WHERE status="pending"'); pw = c.fetchone()
+    conn.close()
+    bot.edit_message_text(
+        f"📊 **СТАТИСТИКА**\n\n"
+        f"👥 Пользователей: {tu} (+{n24})\n"
+        f"💰 Баланс: ${fin[0] or 0:.2f}\n"
+        f"💵 Заработано: ${fin[1] or 0:.2f}\n"
+        f"💳 Выведено: ${fin[2] or 0:.2f}\n\n"
+        f"📱 Коды: {wc}\n"
+        f"📷 QR: {wq}\n"
+        f"💳 Выводы: {pw[0] or 0} (${pw[1] or 0:.2f})",
+        call.message.chat.id, call.message.message_id, parse_mode='Markdown',
+        reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("🔄 Обновить", callback_data='admin_stats'), types.InlineKeyboardButton("◀️ Назад", callback_data='admin_back')))
+
+@bot.callback_query_handler(func=lambda call: call.data == 'admin_settings')
+def admin_settings(call):
+    if not is_admin(call.from_user.id): return
+    cp = float(get_setting('code_price','4.00')); qp = float(get_setting('qr_price','4.00')); ht = int(get_setting('hold_time','300'))
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    markup.add(types.InlineKeyboardButton("💰 Цена кода", callback_data='admin_set_code_price'), types.InlineKeyboardButton("📷 Цена QR", callback_data='admin_set_qr_price'), types.InlineKeyboardButton("⏱ Холд", callback_data='admin_set_hold_time'), types.InlineKeyboardButton("◀️ Назад", callback_data='admin_back'))
+    bot.edit_message_text(f"⚙️ **НАСТРОЙКИ**\n\n💰 Код: ${cp:.2f}\n📷 QR: ${qp:.2f}\n⏱ Холд: {ht//60} мин", call.message.chat.id, call.message.message_id, parse_mode='Markdown', reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data in ['admin_set_code_price','admin_set_qr_price','admin_set_hold_time'])
+def admin_set_prices(call):
+    if not is_admin(call.from_user.id): return
+    if call.data == 'admin_set_code_price': user_states[call.from_user.id] = {'state': 'admin_setting_code_price'}; cur = float(get_setting('code_price','4.00'))
+    elif call.data == 'admin_set_qr_price': user_states[call.from_user.id] = {'state': 'admin_setting_qr_price'}; cur = float(get_setting('qr_price','4.00'))
+    else: user_states[call.from_user.id] = {'state': 'admin_setting_hold_time'}; cur = int(get_setting('hold_time','300')) // 60
+    bot.edit_message_text(f"📝 Отправьте новое значение\nТекущее: {cur}", call.message.chat.id, call.message.message_id, parse_mode='Markdown', reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("❌ Отмена", callback_data='admin_settings')))
+
+@bot.message_handler(func=lambda m: user_states.get(m.from_user.id,{}).get('state') in ['admin_setting_code_price','admin_setting_qr_price','admin_setting_hold_time'])
+def process_admin_settings(message):
+    if not is_admin(message.from_user.id): return
+    state = user_states[message.from_user.id]['state']
+    del user_states[message.from_user.id]
+    try: val = float(message.text.strip())
+    except: bot.reply_to(message, "❌ Неверно"); return
+    if state == 'admin_setting_code_price': update_setting('code_price', val); name = "цена кода"
+    elif state == 'admin_setting_qr_price': update_setting('qr_price', val); name = "цена QR"
+    else:
+        if val < 1 or val > 60: bot.reply_to(message, "❌ 1-60 мин"); return
+        update_setting('hold_time', int(val * 60)); name = f"холд ({int(val)} мин)"
+    bot.reply_to(message, f"✅ Обновлено!\n📝 {name}: {val}", parse_mode='Markdown', reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("◀️ К настройкам", callback_data='admin_settings')))
+
+@bot.callback_query_handler(func=lambda call: call.data == 'admin_clear_queue')
+def admin_clear_queue(call):
+    if not is_admin(call.from_user.id): return
+    conn = sqlite3.connect('max_bot.db')
+    c = conn.cursor()
+    c.execute('SELECT COUNT(*) FROM code_queue WHERE status="waiting"'); wc = c.fetchone()[0]
+    c.execute('SELECT COUNT(*) FROM qr_queue WHERE status="waiting"'); wq = c.fetchone()[0]
+    conn.close()
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    markup.add(types.InlineKeyboardButton("🧹 Очистить ВСЕ", callback_data='admin_clear_all_waiting'), types.InlineKeyboardButton("📱 Только коды", callback_data='admin_clear_code_waiting'), types.InlineKeyboardButton("📷 Только QR", callback_data='admin_clear_qr_waiting'), types.InlineKeyboardButton("🔄 Сбросить активные", callback_data='admin_reset_active'), types.InlineKeyboardButton("💀 Полная очистка", callback_data='admin_clear_all'), types.InlineKeyboardButton("◀️ Назад", callback_data='admin_back'))
+    bot.edit_message_text(f"🧹 **ОЧИСТКА ОЧЕРЕДИ**\n\n📱 Коды: {wc}\n📷 QR: {wq}", call.message.chat.id, call.message.message_id, parse_mode='Markdown', reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data in ['admin_clear_all_waiting','admin_clear_code_waiting','admin_clear_qr_waiting','admin_reset_active'])
+def admin_clear_exec(call):
+    if not is_admin(call.from_user.id): return
+    conn = sqlite3.connect('max_bot.db')
+    c = conn.cursor()
+    if call.data == 'admin_clear_all_waiting': c.execute('DELETE FROM code_queue WHERE status="waiting"'); dc = c.rowcount; c.execute('DELETE FROM qr_queue WHERE status="waiting"'); dq = c.rowcount; text = f"✅ Очищено!\n📱 Кодов: {dc}\n📷 QR: {dq}"
+    elif call.data == 'admin_clear_code_waiting': c.execute('DELETE FROM code_queue WHERE status="waiting"'); text = f"✅ Коды очищены: {c.rowcount}"
+    elif call.data == 'admin_clear_qr_waiting': c.execute('DELETE FROM qr_queue WHERE status="waiting"'); text = f"✅ QR очищены: {c.rowcount}"
+    else: c.execute('UPDATE code_queue SET status="waiting", taken_by=NULL WHERE status="taken"'); rc = c.rowcount; c.execute('UPDATE qr_queue SET status="waiting", taken_by=NULL WHERE status="taken"'); rq = c.rowcount; text = f"✅ Сброшено: {rc+rq}"
+    conn.commit()
+    conn.close()
+    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode='Markdown', reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("◀️ Назад", callback_data='admin_clear_queue')))
+
+@bot.callback_query_handler(func=lambda call: call.data == 'admin_broadcast')
+def admin_broadcast(call):
+    if not is_admin(call.from_user.id): return
+    conn = sqlite3.connect('max_bot.db')
+    c = conn.cursor()
+    c.execute('SELECT COUNT(*) FROM users'); total = c.fetchone()[0]
+    conn.close()
+    user_states[call.from_user.id] = {'state': 'admin_broadcast_waiting_message'}
+    bot.edit_message_text(f"📢 **РАССЫЛКА**\n\n👥 Пользователей: {total}\n\n📝 Отправьте текст сообщения\n/cancel — отмена", call.message.chat.id, call.message.message_id, parse_mode='Markdown', reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("❌ Отмена", callback_data='admin_back')))
+
+@bot.message_handler(commands=['cancel'])
+def cancel_broadcast(message):
+    if is_admin(message.from_user.id) and user_states.get(message.from_user.id,{}).get('state')=='admin_broadcast_waiting_message':
+        del user_states[message.from_user.id]
+        bot.reply_to(message, "❌ Рассылка отменена")
+
+@bot.message_handler(func=lambda m: user_states.get(m.from_user.id,{}).get('state')=='admin_broadcast_waiting_message')
+def process_broadcast(message):
+    if not is_admin(message.from_user.id): return
+    text = message.text.strip()
+    del user_states[message.from_user.id]
+    if not hasattr(bot, 'broadcast_text'): bot.broadcast_text = {}
+    bot.broadcast_text[message.from_user.id] = text
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(types.InlineKeyboardButton("✅ Отправить", callback_data='admin_broadcast_confirm'), types.InlineKeyboardButton("❌ Отмена", callback_data='admin_back'))
+    bot.reply_to(message, f"📢 **ПРЕДПРОСМОТР**\n\n{text[:200]}...", parse_mode='Markdown', reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data == 'admin_broadcast_confirm')
+def admin_broadcast_confirm(call):
+    if not is_admin(call.from_user.id): return
+    text = bot.broadcast_text.get(call.from_user.id, '')
+    if not text: bot.answer_callback_query(call.id, "❌ Нет текста", show_alert=True); return
+    conn = sqlite3.connect('max_bot.db')
+    c = conn.cursor()
+    c.execute('SELECT user_id FROM users'); users = c.fetchall()
+    conn.close()
+    sent, failed = 0, 0
+    for (uid,) in users:
+        try: bot.send_message(uid, f"📢 **РАССЫЛКА**\n\n{text}", parse_mode='Markdown'); sent += 1
+        except: failed += 1
+        time.sleep(0.05)
+    bot.edit_message_text(f"✅ **РАССЫЛКА ЗАВЕРШЕНА**\n\n✅ Отправлено: {sent}\n❌ Ошибок: {failed}\n📊 Всего: {len(users)}", call.message.chat.id, call.message.message_id, parse_mode='Markdown', reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("◀️ В админ-панель", callback_data='admin_back')))
+
+@bot.callback_query_handler(func=lambda call: call.data == 'admin_back')
+def admin_back(call):
+    if not is_admin(call.from_user.id): bot.answer_callback_query(call.id, "❌ Нет доступа", show_alert=True); return
+    code_price = float(get_setting('code_price','4.00'))
+    qr_price = float(get_setting('qr_price','4.00'))
+    ht = int(get_setting('hold_time','300'))
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(types.InlineKeyboardButton("📊 Статистика", callback_data='admin_stats'), types.InlineKeyboardButton("⚙️ Настройки", callback_data='admin_settings'), types.InlineKeyboardButton("💰 Выводы", callback_data='admin_withdrawals'), types.InlineKeyboardButton("🧹 Очистка", callback_data='admin_clear_queue'), types.InlineKeyboardButton("📢 Рассылка", callback_data='admin_broadcast'), types.InlineKeyboardButton("🔍 Поиск", callback_data='admin_search'))
+    try: bot.edit_message_text(f"╭━━━━━━━━━━━━━━━━━━╮\n│  👑 **АДМИН-ПАНЕЛЬ** │\n╰━━━━━━━━━━━━━━━━━━╯\n\n👤 @{call.from_user.username}\n🕐 {datetime.now().strftime('%H:%M:%S')}\n\n💰 Код: ${code_price:.2f}\n📷 QR: ${qr_price:.2f}\n⏱ Холд: {ht//60} мин", call.message.chat.id, call.message.message_id, parse_mode='Markdown', reply_markup=markup)
+    except: pass
+
+@bot.callback_query_handler(func=lambda call: call.data == 'admin_search')
+def admin_search(call):
+    if not is_admin(call.from_user.id): return
+    user_states[call.from_user.id] = {'state': 'admin_searching'}
+    bot.edit_message_text("🔍 **ПОИСК ПОЛЬЗОВАТЕЛЯ**\n\n📝 Отправьте ID или @username\n\n💡 Примеры:\n• `583921047`\n• `@user123`", call.message.chat.id, call.message.message_id, parse_mode='Markdown', reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("❌ Отмена", callback_data='admin_back')))
+
+@bot.message_handler(func=lambda m: user_states.get(m.from_user.id,{}).get('state')=='admin_searching')
+def admin_search_exec(message):
+    if not is_admin(message.from_user.id): return
+    q = message.text.strip()
+    del user_states[message.from_user.id]
+    conn = sqlite3.connect('max_bot.db')
+    c = conn.cursor()
+    if q.startswith('@'): c.execute('SELECT * FROM users WHERE username=?', (q[1:],))
+    else:
+        try: c.execute('SELECT * FROM users WHERE user_id=?', (int(q),))
+        except: bot.reply_to(message, "❌ Неверный формат"); conn.close(); return
+    user = c.fetchone()
+    if user:
+        c.execute('SELECT COUNT(*) as t, SUM(CASE WHEN status="completed" THEN 1 ELSE 0 END) as ok, SUM(CASE WHEN status="failed" THEN 1 ELSE 0 END) as fl, SUM(CASE WHEN status="problem" THEN 1 ELSE 0 END) as pr, SUM(CASE WHEN status IN ("taken","waiting") THEN 1 ELSE 0 END) as ac FROM code_queue WHERE user_id=?', (user[0],))
+        cs = c.fetchone()
+        c.execute('SELECT COUNT(*) as t, SUM(CASE WHEN status="completed" THEN 1 ELSE 0 END) as ok, SUM(CASE WHEN status="failed" THEN 1 ELSE 0 END) as fl, SUM(CASE WHEN status="problem" THEN 1 ELSE 0 END) as pr, SUM(CASE WHEN status IN ("taken","waiting") THEN 1 ELSE 0 END) as ac FROM qr_queue WHERE user_id=?', (user[0],))
+        qs = c.fetchone()
+        c.execute('SELECT amount, type, description, created_at FROM transactions WHERE user_id=? ORDER BY created_at DESC LIMIT 5', (user[0],))
+        transactions = c.fetchall()
+        c.execute('SELECT COUNT(*), SUM(amount) FROM withdraw_requests WHERE user_id=? AND status="pending"', (user[0],))
+        pending_w = c.fetchone()
+        conn.close()
+        total_orders = (cs[0] or 0) + (qs[0] or 0)
+        success = (cs[1] or 0) + (qs[1] or 0)
+        failed = (cs[2] or 0) + (qs[2] or 0)
+        problem = (cs[3] or 0) + (qs[3] or 0)
+        active = (cs[4] or 0) + (qs[4] or 0)
+        success_rate = (success/total_orders*100) if total_orders > 0 else 0
+        text = (
+            f"✅ **ПОЛЬЗОВАТЕЛЬ НАЙДЕН**\n\n"
+            f"📱 **Информация**\n"
+            f"• ID: `{user[0]}`\n"
+            f"• Username: @{user[1] or 'Не указан'}\n"
+            f"• Статус: {'🚫 Заблокирован' if user[11] else '✅ Активен'}\n"
+            f"• Регистрация: {user[9][:19] if user[9] else 'Н/Д'}\n\n"
+            f"💰 **Финансы**\n"
+            f"• Баланс: **${user[2]:.2f}**\n"
+            f"• В холде: ${user[4]:.2f}\n"
+            f"• Заработано: ${user[3]:.2f}\n"
+            f"• Выведено: ${user[5]:.2f}\n\n"
+            f"📊 **Заказы**\n"
+            f"• Всего: {total_orders}\n"
+            f"• Успешно: {success} ({success_rate:.0f}%)\n"
+            f"• Провалено: {failed}\n"
+            f"• Проблемных: {problem}\n"
+            f"• Активных: {active}\n"
+        )
+        if pending_w[0] > 0: text += f"\n💳 **Выводы**\n• Активных: {pending_w[0]}\n• На сумму: ${pending_w[1] or 0:.2f}\n"
+        if transactions:
+            text += f"\n💼 **Последние транзакции:**\n"
+            for t in transactions[:3]:
+                emoji = "🟢" if t[1] == "income" else "🔴" if t[1] == "withdraw" else "⚪"
+                text += f"{emoji} ${t[0]:.2f} — {t[2]}\n"
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        markup.add(types.InlineKeyboardButton("💰 Изменить баланс", callback_data=f'admin_edit_balance_{user[0]}'), types.InlineKeyboardButton("📱 Заказы", callback_data=f'admin_user_orders_{user[0]}'))
+        if user[11]: markup.add(types.InlineKeyboardButton("✅ Разблокировать", callback_data=f'admin_unblock_{user[0]}'))
+        else: markup.add(types.InlineKeyboardButton("🚫 Заблокировать", callback_data=f'admin_block_{user[0]}'))
+        markup.add(types.InlineKeyboardButton("📩 Отправить сообщение", callback_data=f'admin_msg_{user[0]}'))
+        markup.add(types.InlineKeyboardButton("🔍 Новый поиск", callback_data='admin_search'))
+        markup.add(types.InlineKeyboardButton("◀️ В админ-панель", callback_data='admin_back'))
+        bot.reply_to(message, text, parse_mode='Markdown', reply_markup=markup)
+    else:
+        conn.close()
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("🔍 Попробовать снова", callback_data='admin_search'), types.InlineKeyboardButton("◀️ В админ-панель", callback_data='admin_back'))
+        bot.reply_to(message, "❌ **Пользователь не найден**\n\nПроверьте правильность ID или @username", parse_mode='Markdown', reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('admin_edit_balance_'))
+def admin_edit_balance(call):
+    if not is_admin(call.from_user.id): return
+    uid = int(call.data.split('_')[3])
+    conn = sqlite3.connect('max_bot.db')
+    c = conn.cursor()
+    c.execute('SELECT balance, username FROM users WHERE user_id=?', (uid,))
+    user = c.fetchone()
+    conn.close()
+    if not user: bot.answer_callback_query(call.id, "❌ Не найден", show_alert=True); return
+    user_states[call.from_user.id] = {'state': 'admin_editing_balance', 'user_id': uid}
+    bot.edit_message_text(f"💰 **ИЗМЕНЕНИЕ БАЛАНСА**\n\n👤 @{user[1] or 'Нет'} (ID: `{uid}`)\n💰 Текущий: **${user[0]:.2f}**\n\n📝 Отправьте:\n• `+10` — добавить $10\n• `-5` — убавить $5\n• `50` — установить $50", call.message.chat.id, call.message.message_id, parse_mode='Markdown', reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("❌ Отмена", callback_data=f'admin_user_info_{uid}')))
+
+@bot.message_handler(func=lambda m: user_states.get(m.from_user.id,{}).get('state')=='admin_editing_balance')
+def process_admin_edit_balance(message):
+    if not is_admin(message.from_user.id): return
+    us = user_states[message.from_user.id]
+    uid = us['user_id']
+    del user_states[message.from_user.id]
+    conn = sqlite3.connect('max_bot.db')
+    c = conn.cursor()
+    c.execute('SELECT balance, username FROM users WHERE user_id=?', (uid,))
+    user = c.fetchone()
+    if not user: bot.reply_to(message, "❌ Не найден"); conn.close(); return
+    old_balance = user[0]
+    inp = message.text.strip()
+    try:
+        if inp.startswith('+'): new_balance = old_balance + float(inp[1:]); diff = float(inp[1:]); action = "пополнен"
+        elif inp.startswith('-'): diff = float(inp[1:]); new_balance = max(0, old_balance - diff); action = "уменьшен"
+        else: new_balance = float(inp); diff = new_balance - old_balance; action = "установлен"
+    except: bot.reply_to(message, "❌ Неверный формат"); conn.close(); return
+    c.execute('UPDATE users SET balance=? WHERE user_id=?', (new_balance, uid))
+    if diff != 0: c.execute('INSERT INTO transactions (user_id, amount, type, description) VALUES (?,?,"admin_edit",?)', (uid, abs(diff), f'Админ {action} баланс на ${abs(diff):.2f}'))
+    conn.commit()
+    conn.close()
+    try: bot.send_message(uid, f"💰 **Баланс изменен**\n\n📝 Старый: ${old_balance:.2f}\n💎 Новый: **${new_balance:.2f}**\n📊 Изменение: {'+' if diff > 0 else ''}${diff:.2f}", parse_mode='Markdown')
+    except: pass
+    bot.reply_to(message, f"✅ Баланс обновлен!\n👤 @{user[1] or 'Нет'}\n💰 ${old_balance:.2f} → **${new_balance:.2f}**", parse_mode='Markdown', reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("🔍 Поиск", callback_data='admin_search'), types.InlineKeyboardButton("◀️ В админ-панель", callback_data='admin_back')))
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('admin_block_'))
+def admin_block_user(call):
+    if not is_admin(call.from_user.id): return
+    uid = int(call.data.split('_')[2])
+    conn = sqlite3.connect('max_bot.db')
+    c = conn.cursor()
+    c.execute('UPDATE users SET is_blocked=1 WHERE user_id=?', (uid,))
+    c.execute('SELECT username FROM users WHERE user_id=?', (uid,))
+    user = c.fetchone()
+    conn.commit()
+    conn.close()
+    try: bot.send_message(uid, "🚫 **Аккаунт заблокирован**\n\nОбратитесь в поддержку", parse_mode='Markdown')
+    except: pass
+    bot.answer_callback_query(call.id, f"✅ @{user[0] or 'Пользователь'} заблокирован")
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(types.InlineKeyboardButton("💰 Баланс", callback_data=f'admin_edit_balance_{uid}'), types.InlineKeyboardButton("✅ Разблокировать", callback_data=f'admin_unblock_{uid}'))
+    markup.add(types.InlineKeyboardButton("🔍 Поиск", callback_data='admin_search'))
+    bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('admin_unblock_'))
+def admin_unblock_user(call):
+    if not is_admin(call.from_user.id): return
+    uid = int(call.data.split('_')[2])
+    conn = sqlite3.connect('max_bot.db')
+    c = conn.cursor()
+    c.execute('UPDATE users SET is_blocked=0 WHERE user_id=?', (uid,))
+    c.execute('SELECT username FROM users WHERE user_id=?', (uid,))
+    user = c.fetchone()
+    conn.commit()
+    conn.close()
+    try: bot.send_message(uid, "✅ **Аккаунт разблокирован**\n\nМожете продолжить использование", parse_mode='Markdown')
+    except: pass
+    bot.answer_callback_query(call.id, f"✅ @{user[0] or 'Пользователь'} разблокирован")
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(types.InlineKeyboardButton("💰 Баланс", callback_data=f'admin_edit_balance_{uid}'), types.InlineKeyboardButton("🚫 Заблокировать", callback_data=f'admin_block_{uid}'))
+    markup.add(types.InlineKeyboardButton("🔍 Поиск", callback_data='admin_search'))
+    bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('admin_msg_'))
+def admin_message_user(call):
+    if not is_admin(call.from_user.id): return
+    uid = int(call.data.split('_')[2])
+    user_states[call.from_user.id] = {'state': 'admin_messaging', 'user_id': uid}
+    bot.edit_message_text(f"📩 **ОТПРАВКА СООБЩЕНИЯ**\n\n👤 ID: `{uid}`\n\n📝 Отправьте текст", call.message.chat.id, call.message.message_id, parse_mode='Markdown', reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("❌ Отмена", callback_data=f'admin_user_info_{uid}')))
+
+@bot.message_handler(func=lambda m: user_states.get(m.from_user.id,{}).get('state')=='admin_messaging')
+def process_admin_message(message):
+    if not is_admin(message.from_user.id): return
+    us = user_states[message.from_user.id]
+    uid = us['user_id']
+    del user_states[message.from_user.id]
+    try: bot.send_message(uid, f"📩 **Сообщение от администратора**\n\n{message.text}\n\n💡 Не отвечайте на это сообщение", parse_mode='Markdown'); bot.reply_to(message, f"✅ Отправлено пользователю {uid}", reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("◀️ В админ-панель", callback_data='admin_back')))
+    except Exception as e: bot.reply_to(message, f"❌ Ошибка: {e}")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('admin_user_info_'))
+def admin_user_info_callback(call):
+    if not is_admin(call.from_user.id): return
+    uid = int(call.data.split('_')[3])
+    conn = sqlite3.connect('max_bot.db')
+    c = conn.cursor()
+    c.execute('SELECT * FROM users WHERE user_id=?', (uid,))
+    user = c.fetchone()
+    conn.close()
+    if not user: bot.answer_callback_query(call.id, "❌ Не найден", show_alert=True); return
+    text = f"👤 **ИНФОРМАЦИЯ**\n\n🆔 `{user[0]}`\n👤 @{user[1] or 'Нет'}\n💰 ${user[2]:.2f}\n📊 {user[6]} заказов\n📅 {user[9][:10] if user[9] else 'Н/Д'}"
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(types.InlineKeyboardButton("💰 Баланс", callback_data=f'admin_edit_balance_{uid}'), types.InlineKeyboardButton("📩 Сообщение", callback_data=f'admin_msg_{uid}'))
+    markup.add(types.InlineKeyboardButton("🔍 Поиск", callback_data='admin_search'))
+    try: bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode='Markdown', reply_markup=markup)
+    except: pass
+
+@bot.callback_query_handler(func=lambda call: call.data == 'admin_withdrawals')
+def admin_withdrawals(call):
+    if not is_admin(call.from_user.id): return
+    conn = sqlite3.connect('max_bot.db')
+    c = conn.cursor()
+    c.execute('SELECT wr.id, wr.user_id, u.username, wr.amount FROM withdraw_requests wr LEFT JOIN users u ON wr.user_id=u.user_id WHERE wr.status="pending" ORDER BY wr.created_at ASC')
+    pending = c.fetchall()
+    conn.close()
+    text = "💳 **ЗАЯВКИ НА ВЫВОД**\n\n"
+    if pending:
+        text += "🔴 Ожидают обработки:\n\n"
+        for w in pending: text += f"📋 #{w[0]} — @{w[2] or 'Нет'} — ${w[3]:.2f}\n"
+    else: text += "✅ Нет ожидающих заявок\n"
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for w in pending: markup.add(types.InlineKeyboardButton(f"💰 #{w[0]} — ${w[3]:.2f}", callback_data=f'process_withdraw_{w[0]}'))
+    markup.add(types.InlineKeyboardButton("◀️ Назад", callback_data='admin_back'))
+    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode='Markdown', reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data == 'admin_clear_all')
+def admin_clear_all_confirm(call):
+    if not is_admin(call.from_user.id): return
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(types.InlineKeyboardButton("⚠️ ДА, ОЧИСТИТЬ", callback_data='admin_clear_all_exec'), types.InlineKeyboardButton("❌ Нет", callback_data='admin_clear_queue'))
+    bot.edit_message_text("⚠️ **ПОЛНАЯ ОЧИСТКА**\n\nУдалить ВСЕ заявки?\nЭто действие необратимо!", call.message.chat.id, call.message.message_id, parse_mode='Markdown', reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data == 'admin_clear_all_exec')
+def admin_clear_all_exec(call):
+    if not is_admin(call.from_user.id): return
+    conn = sqlite3.connect('max_bot.db')
+    c = conn.cursor()
+    c.execute('DELETE FROM code_queue'); dc = c.rowcount
+    c.execute('DELETE FROM qr_queue'); dq = c.rowcount
+    conn.commit()
+    conn.close()
+    bot.edit_message_text(f"✅ База очищена!\n📱 Кодов: {dc}\n📷 QR: {dq}\n📊 Всего: {dc+dq}", call.message.chat.id, call.message.message_id, parse_mode='Markdown', reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("◀️ В админ-панель", callback_data='admin_back')))
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('skip_qr_'))
+def handle_skip_qr(call):
+    qr_id = int(call.data.split('_')[2])
+    conn = sqlite3.connect('max_bot.db')
+    c = conn.cursor()
+    c.execute('SELECT user_id FROM qr_queue WHERE id=?', (qr_id,))
+    qr = c.fetchone()
+    if qr:
+        c.execute('UPDATE qr_queue SET status="problem", problem_at=CURRENT_TIMESTAMP WHERE id=?', (qr_id,))
+        conn.commit()
+        conn.close()
+        try: bot.send_message(qr[0], "⚠️ **ПРОБЛЕМА С QR**\n\n❌ QR недействителен\n🔄 Попробуйте другой", parse_mode='Markdown')
+        except: pass
+        bot.edit_message_text(f"⏭ QR пропущен\n📋 #{qr_id}", call.message.chat.id, call.message.message_id, parse_mode='Markdown')
+        bot.answer_callback_query(call.id, "⏭ Пропущен")
+    else: bot.answer_callback_query(call.id, "❌ Не найдена", show_alert=True)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('cancel_qr_'))
+def handle_cancel_qr(call):
+    qr_id = int(call.data.split('_')[2])
+    conn = sqlite3.connect('max_bot.db')
+    c = conn.cursor()
+    c.execute('SELECT user_id, taken_by FROM qr_queue WHERE id=?', (qr_id,))
+    qr = c.fetchone()
+    if qr:
+        c.execute('UPDATE qr_queue SET status="waiting", taken_by=NULL, taken_at=NULL, qr_sent=0, qr_file_id=NULL WHERE id=?', (qr_id,))
+        conn.commit()
+        conn.close()
+        if qr[1]:
+            try: bot.send_message(qr[1], f"❌ QR отменен\n📋 #{qr_id}\nВозвращен в очередь", parse_mode='Markdown')
+            except: pass
+        try: bot.edit_message_caption("❌ QR отменен\n\nЗаявка возвращена в очередь", call.message.chat.id, call.message.message_id, parse_mode='Markdown', reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("◀️ В меню", callback_data='back_to_menu')))
+        except: bot.send_message(call.message.chat.id, "❌ QR отменен", parse_mode='Markdown')
+        bot.answer_callback_query(call.id, "✅ Отменен")
+    else: bot.answer_callback_query(call.id, "❌ Не найдена", show_alert=True)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('resend_code_'))
+def handle_resend_code(call):
+    oid = int(call.data.split('_')[2])
+    conn = sqlite3.connect('max_bot.db')
+    c = conn.cursor()
+    c.execute('SELECT id, taken_by, phone_number FROM code_queue WHERE id=? AND status="taken"', (oid,))
+    order = c.fetchone()
+    if order and order[1]:
+        c.execute('UPDATE code_queue SET attempts=attempts+1 WHERE id=?', (oid,))
+        conn.commit()
+        try: bot.send_message(order[1], f"🔄 **ПОВТОРНЫЙ КОД**\n\n📱 `{order[2]}`\n📋 #{oid}\n\nОтправьте код повторно", parse_mode='Markdown')
+        except: pass
+        bot.answer_callback_query(call.id, "✅ Запрос отправлен!")
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        markup.add(types.InlineKeyboardButton("🔢 Ввести код", callback_data=f'enter_code_{oid}'), types.InlineKeyboardButton("🔄 Повтор", callback_data=f'resend_code_{oid}'))
+        bot.edit_message_text("🔄 Запрос на повторный код отправлен\n⏱ Ожидайте...", call.message.chat.id, call.message.message_id, parse_mode='Markdown', reply_markup=markup)
+    else: bot.answer_callback_query(call.id, "❌ Не активна", show_alert=True)
+    conn.close()
+
+@bot.callback_query_handler(func=lambda call: True)
+def main_callback(call):
+    data = call.data
+    if data == 'sell_max': show_sell_options(call.message)
+    elif data == 'sell_code': start_code_sell(call.message)
+    elif data == 'sell_qr': start_qr_sell(call.message)
+    elif data == 'confirm_qr': confirm_qr_sell(call)
+    elif data == 'profile': show_profile(call.message)
+    elif data == 'back_to_menu': show_main_menu(call.message.chat.id, call.message.message_id)
+    elif data == 'back_to_sell': show_sell_options(call.message)
+    elif data == 'get_code': get_next_code(call)
+    elif data == 'get_qr': get_next_qr(call)
+    elif data.startswith('send_code_'): handle_send_code(call)
+    elif data.startswith('skip_code_'): handle_skip_code(call)
+    elif data.startswith('enter_code_'): handle_enter_code_request(call)
+    elif data.startswith('code_success_'): handle_code_success(call)
+    elif data.startswith('code_password_'): handle_code_password(call)
+    elif data.startswith('code_failed_'): handle_code_failed(call)
+    elif data.startswith('scanned_'): handle_qr_scanned(call)
+    elif data.startswith('qr_success_'): handle_qr_success(call)
+    elif data.startswith('qr_password_'): handle_qr_password(call)
+    elif data.startswith('qr_failed_'): handle_qr_failed(call)
+    elif data == 'waiting': bot.answer_callback_query(call.id, "⏳ Ожидайте...")
+
+if __name__ == '__main__':
+    print("🤖 БОТ ЗАПУЩЕН!")
+    print(f"💬 Чат: {CHAT_LINK}")
+    print(f"🆘 Поддержка: {SUPPORT_USERNAME}")
+    print(f"📱 Работает во всех топиках")
+    if PRIVATE_CHANNEL: print(f"🔒 Частный канал")
+    else: print(f"📢 Публичный канал")
+    bot.polling(none_stop=True)
