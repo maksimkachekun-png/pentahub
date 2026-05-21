@@ -150,10 +150,7 @@ def send_queue_notification(user_id, position):
         notify_before = int(get_setting('notify_before_queue', '3'))
         if position <= notify_before:
             bot.send_message(user_id,
-                f"⚡ **СКОРО ВАША ОЧЕРЕДЬ!**\n\n"
-                f"📍 Позиция: **{position}**\n"
-                f"⏱ Будьте готовы ввести код\n\n"
-                f"💡 Не выключайте уведомления!",
+                f"⚡ **СКОРО ВАША ОЧЕРЕДЬ!**\n\n📍 Позиция: **{position}**\n⏱ Будьте готовы ввести код\n\n💡 Не выключайте уведомления!",
                 parse_mode='Markdown')
     except: pass
 
@@ -170,10 +167,7 @@ def pay_referral_bonus(user_id, order_id):
         conn.commit()
         try:
             bot.send_message(ref[0],
-                f"💰 **РЕФЕРАЛЬНЫЙ БОНУС!**\n\n"
-                f"Ваш реферал сдал номер #{order_id}\n"
-                f"💵 Начислено: **${bonus:.2f}**\n\n"
-                f"Продолжайте приглашать! 🎯",
+                f"💰 **РЕФЕРАЛЬНЫЙ БОНУС!**\n\nВаш реферал сдал номер #{order_id}\n💵 Начислено: **${bonus:.2f}**\n\nПродолжайте приглашать! 🎯",
                 parse_mode='Markdown')
         except: pass
     conn.close()
@@ -193,13 +187,9 @@ def show_main_menu(chat_id, message_id=None):
     code_price = float(get_setting('code_price','4.00'))
     qr_price = float(get_setting('qr_price','4.00'))
     menu_text = (
-        "╭━━━━━━━━━━━━━━━━━━╮\n"
-        "│  🏠 **ГЛАВНОЕ МЕНЮ**  │\n"
-        "╰━━━━━━━━━━━━━━━━━━╯\n\n"
-        "👋 Добро пожаловать в MaxBot!\n"
-        "Лучший сервис для сдачи номеров\n\n"
-        "▫️ Сдача по коду: **${:.2f}**\n"
-        "▫️ Сдача по QR: **${:.2f}**\n\n"
+        "╭━━━━━━━━━━━━━━━━━━╮\n│  🏠 **ГЛАВНОЕ МЕНЮ**  │\n╰━━━━━━━━━━━━━━━━━━╯\n\n"
+        "👋 Добро пожаловать в MaxBot!\nЛучший сервис для сдачи номеров\n\n"
+        "▫️ Сдача по коду: **${:.2f}**\n▫️ Сдача по QR: **${:.2f}**\n\n"
         "📍 Выберите действие:"
     ).format(code_price, qr_price)
     markup = get_main_keyboard()
@@ -226,9 +216,7 @@ def start_command(message):
                 conn.commit()
                 try:
                     bot.send_message(referrer[0],
-                        "🎉 **Новый реферал!**\n\n"
-                        "По вашей ссылке зарегистрировался новый пользователь!\n\n"
-                        "💰 Вы будете получать $0.10 за каждый успешно сданный им номер!",
+                        "🎉 **Новый реферал!**\n\nПо вашей ссылке зарегистрировался новый пользователь!\n\n💰 Вы будете получать $0.10 за каждый успешно сданный им номер!",
                         parse_mode='Markdown')
                 except: pass
         conn.close()
@@ -245,9 +233,7 @@ def start_command(message):
             markup.add(types.InlineKeyboardButton("📢 Подписаться на канал", url=f'https://t.me/{CHANNEL_ID[1:]}'))
         markup.add(types.InlineKeyboardButton("✅ Я подписался", callback_data='check_sub'))
         bot.send_message(message.chat.id,
-            "🔒 **ДОСТУП ОГРАНИЧЕН**\n\n"
-            "❌ Для использования бота необходимо подписаться на наш канал!\n\n"
-            "📢 Подпишитесь и нажмите кнопку проверки",
+            "🔒 **ДОСТУП ОГРАНИЧЕН**\n\n❌ Для использования бота необходимо подписаться на наш канал!\n\n📢 Подпишитесь и нажмите кнопку проверки",
             parse_mode='Markdown', reply_markup=markup)
         return
     conn = sqlite3.connect('max_bot.db')
@@ -277,16 +263,10 @@ def referral_command(message):
     conn.close()
     ref_link = f"https://t.me/{bot.get_me().username}?start=ref_{ref_code}"
     text = (
-        "🎯 **РЕФЕРАЛЬНАЯ СИСТЕМА**\n\n"
-        "👥 Приглашайте друзей и зарабатывайте!\n\n"
-        f"📊 **Статистика:**\n"
-        f"├─ Рефералов: {total_refs}\n"
-        f"└─ Заработано: **${earnings:.2f}**\n\n"
-        "💰 **Как это работает:**\n"
-        "Вы получаете $0.10 за каждый\n"
-        "успешно сданный номер реферала\n\n"
-        f"🔗 **Ваша ссылка:**\n`{ref_link}`\n\n"
-        "📱 Отправьте ссылку другу!"
+        "🎯 **РЕФЕРАЛЬНАЯ СИСТЕМА**\n\n👥 Приглашайте друзей и зарабатывайте!\n\n"
+        f"📊 **Статистика:**\n├─ Рефералов: {total_refs}\n└─ Заработано: **${earnings:.2f}**\n\n"
+        "💰 **Как это работает:**\nВы получаете $0.10 за каждый успешно сданный номер реферала\n\n"
+        f"🔗 **Ваша ссылка:**\n`{ref_link}`\n\n📱 Отправьте ссылку другу!"
     )
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("📤 Поделиться", switch_inline_query=f"Зарабатывай со мной! {ref_link}"))
@@ -311,9 +291,7 @@ def show_sell_options(message):
     markup = types.InlineKeyboardMarkup(row_width=1)
     markup.add(types.InlineKeyboardButton("📱 Сдать по коду", callback_data='sell_code'), types.InlineKeyboardButton("📷 Сдать по QR", callback_data='sell_qr'), types.InlineKeyboardButton("◀️ Назад", callback_data='back_to_menu'))
     text = (
-        "╭━━━━━━━━━━━━━━━━━━╮\n"
-        "│  📱 **СДАЧА НОМЕРА**  │\n"
-        "╰━━━━━━━━━━━━━━━━━━╯\n\n"
+        "╭━━━━━━━━━━━━━━━━━━╮\n│  📱 **СДАЧА НОМЕРА**  │\n╰━━━━━━━━━━━━━━━━━━╯\n\n"
         "🔹 **По коду** — ${:.2f}\n└─ Получите SMS с кодом\n\n"
         "🔹 **По QR** — ${:.2f}\n└─ Отсканируйте QR-код\n\n"
         "💎 Вознаграждение до ${:.2f}"
@@ -325,9 +303,7 @@ def start_code_sell(message):
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("◀️ Назад", callback_data='back_to_sell'))
     text = (
-        "╭━━━━━━━━━━━━━━━━━━╮\n"
-        "│  📱 **СДАЧА ПО КОДУ** │\n"
-        "╰━━━━━━━━━━━━━━━━━━╯\n\n"
+        "╭━━━━━━━━━━━━━━━━━━╮\n│  📱 **СДАЧА ПО КОДУ** │\n╰━━━━━━━━━━━━━━━━━━╯\n\n"
         "📝 Отправьте номер телефона\nв формате: `+79XXXXXXXXX`\n\n"
         "⚠️ Только российские номера\n📨 Ожидайте SMS с кодом"
     )
@@ -362,12 +338,7 @@ def process_phone_number(message):
 def start_qr_sell(message):
     markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(types.InlineKeyboardButton("✅ Подтверждаю", callback_data='confirm_qr'), types.InlineKeyboardButton("❌ Отмена", callback_data='back_to_sell'))
-    text = (
-        "╭━━━━━━━━━━━━━━━━━━╮\n"
-        "│  📷 **СДАЧА ПО QR**   │\n"
-        "╰━━━━━━━━━━━━━━━━━━╯\n\n"
-        "🔐 Создать заявку на авторизацию по QR-коду?\n\n⚡ Быстро и безопасно!"
-    )
+    text = "╭━━━━━━━━━━━━━━━━━━╮\n│  📷 **СДАЧА ПО QR**   │\n╰━━━━━━━━━━━━━━━━━━╯\n\n🔐 Создать заявку на авторизацию по QR-коду?\n\n⚡ Быстро и безопасно!"
     try: bot.edit_message_text(text, message.chat.id, message.message_id, parse_mode='Markdown', reply_markup=markup)
     except: bot.send_message(message.chat.id, text, parse_mode='Markdown', reply_markup=markup)
 
@@ -739,10 +710,7 @@ def handle_qr_photo(message):
                 return
             
             bot.reply_to(message,
-                f"✅ **QR ПЕРЕДАН ПОЛЬЗОВАТЕЛЮ**\n\n"
-                f"📋 Заявка: #{qr_id}\n"
-                f"👤 Пользователь: {user_id}\n\n"
-                f"Ожидайте сканирование...",
+                f"✅ **QR ПЕРЕДАН ПОЛЬЗОВАТЕЛЮ**\n\n📋 Заявка: #{qr_id}\n👤 Пользователь: {user_id}\n\nОжидайте сканирование...",
                 parse_mode='Markdown')
             
             del user_states[message.from_user.id]
@@ -775,44 +743,74 @@ def handle_qr_scanned(call):
 def handle_qr_success(call):
     qr_id = int(call.data.split('_')[2])
     thread_id = call.message.message_thread_id if hasattr(call.message, 'message_thread_id') else None
+    
     logger.info(f"✅ Холодник нажал 'Встал' для QR заявки #{qr_id}")
+    
     conn = sqlite3.connect('max_bot.db')
     c = conn.cursor()
-    c.execute('SELECT user_id FROM qr_queue WHERE id=?', (qr_id,))
+    
+    c.execute('SELECT user_id, status, completed FROM qr_queue WHERE id=?', (qr_id,))
     qr = c.fetchone()
-    if qr:
-        price = float(get_setting('qr_price','4.00'))
-        ht = int(get_setting('hold_time','300'))
-        c.execute('UPDATE qr_queue SET status="completed", completed=1, completed_at=CURRENT_TIMESTAMP WHERE id=?', (qr_id,))
-        c.execute('UPDATE users SET total_orders=total_orders+1, hold_balance=hold_balance+? WHERE user_id=?', (price, qr[0]))
-        conn.commit()
-        c.execute('SELECT status, completed FROM qr_queue WHERE id=?', (qr_id,))
-        check_qr = c.fetchone()
-        c.execute('SELECT balance, hold_balance, total_earned FROM users WHERE user_id=?', (qr[0],))
-        check_user = c.fetchone()
-        logger.info(f"🔍 ПРОВЕРКА QR #{qr_id}: status={check_qr[0]}, completed={check_qr[1]}")
-        logger.info(f"🔍 ПРОВЕРКА User {qr[0]}: balance={check_user[0]}, hold={check_user[1]}, earned={check_user[2]}")
-        conn.close()
-        try:
-            bot.send_message(qr[0],
-                f"🎉 **QR УСПЕШНО ПРИНЯТ!**\n\n📷 QR-код\n✅ Вход подтвержден!\n\n💰 Сумма в холде: **${price:.2f}**\n⏱ Холд: {ht//60} мин\n\n💎 Средства поступят через {ht//60} минут",
-                parse_mode='Markdown')
-        except: pass
-        timer = threading.Timer(ht, process_hold_payment, args=[qr[0], qr_id, price, 'qr'])
-        timer.start()
-        if not hasattr(bot, 'hold_timers'): bot.hold_timers = {}
-        bot.hold_timers[f'qr_{qr_id}'] = {'timer': timer, 'user_id': qr[0], 'amount': price}
-        markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("❌ Слетел", callback_data=f'qr_failed_{qr_id}'))
-        notification_text = f"✅ **ПОДТВЕРЖДЕНО**\n\n📷 QR-код успешно принят"
-        if thread_id: send_to_group(notification_text, markup=markup, thread_id=thread_id)
-        else:
-            try: bot.edit_message_text(notification_text, call.message.chat.id, call.message.message_id, parse_mode='Markdown', reply_markup=markup)
-            except: send_to_group(notification_text, markup=markup)
-        bot.answer_callback_query(call.id, "✅ Подтверждено")
-    else:
+    
+    if not qr:
         logger.error(f"❌ QR заявка #{qr_id} не найдена")
         bot.answer_callback_query(call.id, "❌ Заявка не найдена", show_alert=True)
+        conn.close()
+        return
+    
+    logger.info(f"🔍 ДО обновления QR #{qr_id}: status={qr[1]}, completed={qr[2]}")
+    
+    price = float(get_setting('qr_price','4.00'))
+    ht = int(get_setting('hold_time','300'))
+    
+    c.execute("UPDATE qr_queue SET status='completed', completed=1, completed_at=CURRENT_TIMESTAMP WHERE id=?", (qr_id,))
+    
+    c.execute('SELECT status, completed FROM qr_queue WHERE id=?', (qr_id,))
+    check = c.fetchone()
+    logger.info(f"🔍 ПОСЛЕ обновления QR #{qr_id}: status={check[0]}, completed={check[1]}")
+    
+    c.execute('UPDATE users SET total_orders=total_orders+1, hold_balance=hold_balance+? WHERE user_id=?', (price, qr[0]))
+    
+    conn.commit()
+    
+    c.execute('SELECT status, completed FROM qr_queue WHERE id=?', (qr_id,))
+    final_check = c.fetchone()
+    c.execute('SELECT balance, hold_balance FROM users WHERE user_id=?', (qr[0],))
+    user_check = c.fetchone()
+    
+    logger.info(f"🔍 ФИНАЛЬНАЯ проверка QR #{qr_id}: status={final_check[0]}, completed={final_check[1]}")
+    logger.info(f"🔍 User {qr[0]}: balance={user_check[0]}, hold={user_check[1]}")
+    
+    conn.close()
+    
+    try:
+        bot.send_message(qr[0],
+            f"🎉 **QR УСПЕШНО ПРИНЯТ!**\n\n📷 QR-код\n✅ Вход подтвержден!\n\n"
+            f"💰 Сумма в холде: **${price:.2f}**\n⏱ Холд: {ht//60} мин\n\n"
+            f"💎 Средства поступят через {ht//60} минут",
+            parse_mode='Markdown')
+    except: pass
+    
+    timer = threading.Timer(ht, process_hold_payment, args=[qr[0], qr_id, price, 'qr'])
+    timer.start()
+    
+    if not hasattr(bot, 'hold_timers'): bot.hold_timers = {}
+    bot.hold_timers[f'qr_{qr_id}'] = {'timer': timer, 'user_id': qr[0], 'amount': price}
+    
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("❌ Слетел", callback_data=f'qr_failed_{qr_id}'))
+    
+    notification_text = f"✅ **ПОДТВЕРЖДЕНО**\n\n📷 QR-код успешно принят"
+    
+    if thread_id:
+        send_to_group(notification_text, markup=markup, thread_id=thread_id)
+    else:
+        try:
+            bot.edit_message_text(notification_text, call.message.chat.id, call.message.message_id, parse_mode='Markdown', reply_markup=markup)
+        except:
+            send_to_group(notification_text, markup=markup)
+    
+    bot.answer_callback_query(call.id, "✅ Подтверждено")
 
 def handle_qr_failed(call):
     qr_id = int(call.data.split('_')[2])
@@ -869,8 +867,6 @@ def process_qr_password(message):
     send_to_group(f"╭━━━━━━━━━━━━━━━━━━╮\n│  🔐 **ПОЛУЧЕН ПАРОЛЬ** │\n╰━━━━━━━━━━━━━━━━━━╯\n\n🔑 `{pw}`\n📋 #{qr_id}\n\n✅ Встал — вход выполнен\n⏭ Пропустить — проблема", markup=markup, thread_id=thread_id)
     bot.send_message(message.chat.id, "✅ **Пароль отправлен обработчику**\n\n⏱ Ожидайте подтверждение...", parse_mode='Markdown')
 
-# ==================== ПОВТОРНЫЙ QR ====================
-
 @bot.callback_query_handler(func=lambda call: call.data.startswith('resend_qr_'))
 def handle_resend_qr(call):
     qr_id = int(call.data.split('_')[2])
@@ -878,89 +874,39 @@ def handle_resend_qr(call):
     c = conn.cursor()
     c.execute('SELECT id, taken_by, user_id FROM qr_queue WHERE id=? AND status="taken"', (qr_id,))
     qr = c.fetchone()
-    
     if qr and qr[1]:
         c.execute('UPDATE qr_queue SET attempts=attempts+1, qr_sent=0 WHERE id=?', (qr_id,))
         conn.commit()
-        
         thread_id = None
-        if hasattr(bot, 'order_threads') and qr_id in bot.order_threads:
-            thread_id = bot.order_threads[qr_id]
-        
+        if hasattr(bot, 'order_threads') and qr_id in bot.order_threads: thread_id = bot.order_threads[qr_id]
         markup = types.InlineKeyboardMarkup(row_width=2)
-        markup.add(
-            types.InlineKeyboardButton("📸 Отправить QR", callback_data=f'send_qr_{qr_id}'),
-            types.InlineKeyboardButton("⏭ Пропустить", callback_data=f'skip_qr_{qr_id}')
-        )
-        
+        markup.add(types.InlineKeyboardButton("📸 Отправить QR", callback_data=f'send_qr_{qr_id}'), types.InlineKeyboardButton("⏭ Пропустить", callback_data=f'skip_qr_{qr_id}'))
         send_to_group(
-            f"🔄 **ЗАПРОС ПОВТОРНОГО QR**\n\n"
-            f"📋 Заявка: #{qr_id}\n"
-            f"👤 Пользователь: {qr[2]}\n\n"
-            f"Пользователь не смог отсканировать QR\n"
-            f"Отправьте новый QR-код\n\n"
-            f"📸 Отправить QR — отправить новый\n"
-            f"⏭ Пропустить — проблема с QR",
-            markup=markup,
-            thread_id=thread_id
-        )
-        
+            f"🔄 **ЗАПРОС ПОВТОРНОГО QR**\n\n📋 Заявка: #{qr_id}\n👤 Пользователь: {qr[2]}\n\n"
+            f"Пользователь не смог отсканировать QR\nОтправьте новый QR-код\n\n"
+            f"📸 Отправить QR — отправить новый\n⏭ Пропустить — проблема с QR",
+            markup=markup, thread_id=thread_id)
         bot.answer_callback_query(call.id, "✅ Запрос на повтор QR отправлен!")
-        
         markup = types.InlineKeyboardMarkup(row_width=1)
-        markup.add(
-            types.InlineKeyboardButton("✅ Отсканировал", callback_data=f'scanned_{qr_id}'),
-            types.InlineKeyboardButton("🔄 Запросить повтор", callback_data=f'resend_qr_{qr_id}'),
-            types.InlineKeyboardButton("❌ Не могу отсканировать", callback_data=f'cancel_qr_{qr_id}')
-        )
-        
-        try:
-            bot.edit_message_caption(
-                "🔄 **ЗАПРОС НА ПОВТОРНЫЙ QR ОТПРАВЛЕН**\n\n"
-                "⏱ Ожидайте новый QR-код...\n\n"
-                "Или выберите действие:",
-                call.message.chat.id, call.message.message_id,
-                parse_mode='Markdown', reply_markup=markup)
-        except:
-            pass
-    else:
-        bot.answer_callback_query(call.id, "❌ Заявка не активна", show_alert=True)
-    
+        markup.add(types.InlineKeyboardButton("✅ Отсканировал", callback_data=f'scanned_{qr_id}'), types.InlineKeyboardButton("🔄 Запросить повтор", callback_data=f'resend_qr_{qr_id}'), types.InlineKeyboardButton("❌ Не могу отсканировать", callback_data=f'cancel_qr_{qr_id}'))
+        try: bot.edit_message_caption("🔄 **ЗАПРОС НА ПОВТОРНЫЙ QR ОТПРАВЛЕН**\n\n⏱ Ожидайте новый QR-код...\n\nИли выберите действие:", call.message.chat.id, call.message.message_id, parse_mode='Markdown', reply_markup=markup)
+        except: pass
+    else: bot.answer_callback_query(call.id, "❌ Заявка не активна", show_alert=True)
     conn.close()
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('send_qr_'))
 def handle_send_qr_again(call):
     qr_id = int(call.data.split('_')[2])
-    
     conn = sqlite3.connect('max_bot.db')
     c = conn.cursor()
     c.execute('SELECT user_id FROM qr_queue WHERE id=?', (qr_id,))
     qr = c.fetchone()
     conn.close()
-    
     if qr:
-        thread_id = call.message.message_thread_id if hasattr(call.message, 'message_thread_id') else None
-        
-        user_states[call.from_user.id] = {
-            'state': 'waiting_qr_photo',
-            'qr_id': qr_id,
-            'user_id': qr[0]
-        }
-        
-        bot.edit_message_text(
-            f"📸 **ОТПРАВЬТЕ НОВЫЙ QR-КОД**\n\n"
-            f"📋 Заявка: #{qr_id}\n"
-            f"👤 Пользователь: {qr[0]}\n\n"
-            f"Отправьте фото QR-кода\n"
-            f"📎 **ОТВЕТОМ** на это сообщение",
-            call.message.chat.id, call.message.message_id,
-            parse_mode='Markdown')
-        
+        user_states[call.from_user.id] = {'state': 'waiting_qr_photo', 'qr_id': qr_id, 'user_id': qr[0]}
+        bot.edit_message_text(f"📸 **ОТПРАВЬТЕ НОВЫЙ QR-КОД**\n\n📋 Заявка: #{qr_id}\n👤 Пользователь: {qr[0]}\n\nОтправьте фото QR-кода\n📎 **ОТВЕТОМ** на это сообщение", call.message.chat.id, call.message.message_id, parse_mode='Markdown')
         bot.answer_callback_query(call.id, "📸 Отправьте фото QR-кода ответом")
-    else:
-        bot.answer_callback_query(call.id, "❌ Заявка не найдена", show_alert=True)
-
-# ==================== ОТМЕНА QR (НЕ ВОЗВРАЩАЕТ В ОЧЕРЕДЬ) ====================
+    else: bot.answer_callback_query(call.id, "❌ Заявка не найдена", show_alert=True)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('cancel_qr_'))
 def handle_cancel_qr(call):
@@ -969,54 +915,19 @@ def handle_cancel_qr(call):
     c = conn.cursor()
     c.execute('SELECT user_id, taken_by FROM qr_queue WHERE id=?', (qr_id,))
     qr = c.fetchone()
-    
     if qr:
         c.execute('UPDATE qr_queue SET status="problem", problem_at=CURRENT_TIMESTAMP WHERE id=?', (qr_id,))
         conn.commit()
         conn.close()
-        
         thread_id = None
-        if hasattr(bot, 'order_threads') and qr_id in bot.order_threads:
-            thread_id = bot.order_threads[qr_id]
-        
+        if hasattr(bot, 'order_threads') and qr_id in bot.order_threads: thread_id = bot.order_threads[qr_id]
         if qr[1]:
-            try:
-                send_to_group(
-                    f"❌ **QR НЕ ОТСКАНИРОВАН**\n\n"
-                    f"📋 Заявка: #{qr_id}\n"
-                    f"👤 Пользователь не смог отсканировать QR\n\n"
-                    f"Заявка отменена",
-                    thread_id=thread_id
-                )
+            try: send_to_group(f"❌ **QR НЕ ОТСКАНИРОВАН**\n\n📋 Заявка: #{qr_id}\n👤 Пользователь не смог отсканировать QR\n\nЗаявка отменена", thread_id=thread_id)
             except: pass
-        
-        try:
-            bot.edit_message_caption(
-                "❌ **QR НЕ ОТСКАНИРОВАН**\n\n"
-                "Заявка отменена.\n"
-                "Попробуйте сдать другой QR.",
-                call.message.chat.id, call.message.message_id,
-                parse_mode='Markdown',
-                reply_markup=types.InlineKeyboardMarkup().add(
-                    types.InlineKeyboardButton("◀️ В меню", callback_data='back_to_menu')
-                )
-            )
-        except:
-            bot.send_message(call.message.chat.id,
-                "❌ **QR НЕ ОТСКАНИРОВАН**\n\n"
-                "Заявка отменена.\n"
-                "Попробуйте сдать другой QR.",
-                parse_mode='Markdown',
-                reply_markup=types.InlineKeyboardMarkup().add(
-                    types.InlineKeyboardButton("◀️ В меню", callback_data='back_to_menu')
-                )
-            )
-        
+        try: bot.edit_message_caption("❌ **QR НЕ ОТСКАНИРОВАН**\n\nЗаявка отменена.\nПопробуйте сдать другой QR.", call.message.chat.id, call.message.message_id, parse_mode='Markdown', reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("◀️ В меню", callback_data='back_to_menu')))
+        except: bot.send_message(call.message.chat.id, "❌ **QR НЕ ОТСКАНИРОВАН**\n\nЗаявка отменена.\nПопробуйте сдать другой QR.", parse_mode='Markdown', reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("◀️ В меню", callback_data='back_to_menu')))
         bot.answer_callback_query(call.id, "❌ Заявка отменена")
-    else:
-        bot.answer_callback_query(call.id, "❌ Заявка не найдена", show_alert=True)
-
-# ==================== ПОВТОРНЫЙ КОД ====================
+    else: bot.answer_callback_query(call.id, "❌ Заявка не найдена", show_alert=True)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('resend_code_'))
 def handle_resend_code(call):
@@ -1028,43 +939,17 @@ def handle_resend_code(call):
     if order and order[1]:
         c.execute('UPDATE code_queue SET attempts=attempts+1 WHERE id=?', (oid,))
         conn.commit()
-        
         thread_id = None
-        if hasattr(bot, 'order_threads') and oid in bot.order_threads:
-            thread_id = bot.order_threads[oid]
-        
+        if hasattr(bot, 'order_threads') and oid in bot.order_threads: thread_id = bot.order_threads[oid]
         markup = types.InlineKeyboardMarkup(row_width=2)
-        markup.add(
-            types.InlineKeyboardButton("📤 Отправил код", callback_data=f'send_code_{oid}'),
-            types.InlineKeyboardButton("⏭ Пропустить", callback_data=f'skip_code_{oid}')
-        )
-        
-        send_to_group(
-            f"🔄 **ЗАПРОС ПОВТОРНОГО КОДА**\n\n"
-            f"📱 Номер: `{order[2]}`\n"
-            f"📋 Заявка: #{oid}\n\n"
-            f"📤 Отправил код — отправить повторно\n"
-            f"⏭ Пропустить — проблема с номером",
-            markup=markup,
-            thread_id=thread_id
-        )
-        
+        markup.add(types.InlineKeyboardButton("📤 Отправил код", callback_data=f'send_code_{oid}'), types.InlineKeyboardButton("⏭ Пропустить", callback_data=f'skip_code_{oid}'))
+        send_to_group(f"🔄 **ЗАПРОС ПОВТОРНОГО КОДА**\n\n📱 Номер: `{order[2]}`\n📋 Заявка: #{oid}\n\n📤 Отправил код — отправить повторно\n⏭ Пропустить — проблема с номером", markup=markup, thread_id=thread_id)
         bot.answer_callback_query(call.id, "✅ Запрос на повтор отправлен в топик!")
-        
         markup = types.InlineKeyboardMarkup(row_width=1)
-        markup.add(
-            types.InlineKeyboardButton("🔢 Ввести код", callback_data=f'enter_code_{oid}'),
-            types.InlineKeyboardButton("🔄 Повтор", callback_data=f'resend_code_{oid}')
-        )
-        try:
-            bot.edit_message_text(
-                "🔄 **Запрос на повторный код отправлен**\n\n⏱ Ожидайте новый код...",
-                call.message.chat.id, call.message.message_id, 
-                parse_mode='Markdown', reply_markup=markup)
-        except:
-            pass
-    else: 
-        bot.answer_callback_query(call.id, "❌ Не активна", show_alert=True)
+        markup.add(types.InlineKeyboardButton("🔢 Ввести код", callback_data=f'enter_code_{oid}'), types.InlineKeyboardButton("🔄 Повтор", callback_data=f'resend_code_{oid}'))
+        try: bot.edit_message_text("🔄 **Запрос на повторный код отправлен**\n\n⏱ Ожидайте новый код...", call.message.chat.id, call.message.message_id, parse_mode='Markdown', reply_markup=markup)
+        except: pass
+    else: bot.answer_callback_query(call.id, "❌ Не активна", show_alert=True)
     conn.close()
 
 def process_hold_payment(user_id, order_id, amount, order_type='code'):
