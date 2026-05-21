@@ -436,7 +436,12 @@ def show_profile(message):
     ok = ok_codes + ok_qr
     fl = fl_codes + fl_qr
     ip = ip_codes + ip_qr
-    rate = (ok/total*100) if total > 0 else 0
+    
+    # Вычисляем процент БЕЗ форматирования
+    if total > 0:
+        rate = int(ok / total * 100)
+    else:
+        rate = 0
     
     c.execute('SELECT phone_number, status FROM code_queue WHERE user_id=? AND status IN ("taken","waiting") ORDER BY created_at DESC', (message.chat.id,))
     active_codes = c.fetchall() or []
@@ -453,46 +458,59 @@ def show_profile(message):
     
     conn.close()
     
-    status_text = '🟢 В работе' if ip > 0 else '⚪ Ожидание'
+    status_text = 'Активен' if ip > 0 else 'Ожидает'
     
+    # Формируем текст БЕЗ конфликтующих символов
     text = (
-        "╭━━━━━━━━━━━━━━━━━━╮\n│  👤 **МОЙ ПРОФИЛЬ**   │\n╰━━━━━━━━━━━━━━━━━━╯\n\n"
-        "📱 **Информация**\n"
-        f"├─ 🆔 ID: `{user[0]}`\n├─ 👤 @{user[1] or 'Не указан'}\n└─ Статус: {status_text}\n\n"
-        "💰 **Финансы**\n"
-        f"├─ 💎 Баланс: **${user[2]:.2f}**\n├─ 🔒 В холде: **${user[4]:.2f}**\n├─ 💵 Заработано: ${user[3]:.2f}\n└─ 💳 Выведено: ${user[5]:.2f}\n\n"
-        "📊 **Статистика**\n"
-        f"├─ 📝 Всего заказов: {total}\n├─ ✅ Успешно: {ok} ({rate:.0f}%)\n├─ ⏳ В работе: {ip}\n└─ ❌ Отменено: {fl}"
+        "👤 <b>МОЙ ПРОФИЛЬ</b>\n\n"
+        "<b>Информация</b>\n"
+        f"├─ ID: <code>{user[0]}</code>\n"
+        f"├─ @{user[1] or 'Не указан'}\n"
+        f"└─ Статус: {status_text}\n\n"
+        "<b>Финансы</b>\n"
+        f"├─ Баланс: <b>${user[2]:.2f}</b>\n"
+        f"├─ В холде: <b>${user[4]:.2f}</b>\n"
+        f"├─ Заработано: ${user[3]:.2f}\n"
+        f"└─ Выведено: ${user[5]:.2f}\n\n"
+        "<b>Статистика</b>\n"
+        f"├─ Всего заказов: {total}\n"
+        f"├─ Успешно: {ok} ({rate}%)\n"
+        f"├─ В работе: {ip}\n"
+        f"└─ Отменено: {fl}"
     )
     
     if active_codes:
-        text += f"\n\n📱 **Номера в работе:**\n"
+        text += "\n\n<b>Номера в работе:</b>\n"
         for num in active_codes[:5]:
-            st = "🔄 Обрабатывается" if num[1] == "taken" else "⏳ В очереди"
-            text += f"├─ `{num[0]}` — {st}\n"
+            st = "Обрабатывается" if num[1] == "taken" else "В очереди"
+            text += f"├─ <code>{num[0]}</code> — {st}\n"
     
     if active_qrs:
-        text += f"\n📷 **QR в работе:**\n"
+        text += "\n<b>QR в работе:</b>\n"
         for qr in active_qrs[:5]:
-            st = "🔄 Обрабатывается" if qr[1] == "taken" else "⏳ В очереди"
+            st = "Обрабатывается" if qr[1] == "taken" else "В очереди"
             text += f"├─ QR #{qr[0]} — {st}\n"
     
-    if lt: text += f"\n\n💼 **Последняя операция**\n└─ {lt[1]}: ${lt[0]:.2f}"
-    if pw > 0: text += f"\n\n⚠️ Заявок на вывод: {pw}"
+    if lt: 
+        text += f"\n\n<b>Последняя операция</b>\n└─ {lt[1]}: ${lt[0]:.2f}"
+    
+    if pw > 0: 
+        text += f"\n\nЗаявок на вывод: {pw}"
     
     markup = types.InlineKeyboardMarkup(row_width=1)
-    if user[2] > 0: markup.add(types.InlineKeyboardButton("💳 Вывести средства", callback_data='withdraw'))
+    if user[2] > 0: 
+        markup.add(types.InlineKeyboardButton("💳 Вывести средства", callback_data='withdraw'))
     markup.add(types.InlineKeyboardButton("🎯 Рефералы", callback_data='ref_info'))
     markup.add(types.InlineKeyboardButton("◀️ В меню", callback_data='back_to_menu'))
     
     try: 
-        bot.edit_message_text(text, message.chat.id, message.message_id, parse_mode='Markdown', reply_markup=markup)
+        bot.edit_message_text(text, message.chat.id, message.message_id, parse_mode='HTML', reply_markup=markup)
     except Exception as e:
         logger.error(f"Ошибка отображения профиля: {e}")
         try:
-            bot.send_message(message.chat.id, text, parse_mode='Markdown', reply_markup=markup)
+            bot.send_message(message.chat.id, text, parse_mode='HTML', reply_markup=markup)
         except:
-            bot.send_message(message.chat.id, "❌ Ошибка загрузки профиля. Попробуйте позже.", reply_markup=markup)
+            bot.send_message(message.chat.id, "❌ Ошибка загрузки профиля.", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data == 'ref_info')
 def ref_info(call):
