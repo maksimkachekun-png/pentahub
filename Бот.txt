@@ -92,7 +92,8 @@ def init_db():
         ('code_price','4.00'),('qr_price','4.00'),('min_withdraw','1.00'),
         ('hold_time','300'),('referral_bonus','0.10'),('notify_before_queue','3'),
         ('work_start','8'),('work_end','20'),
-        ('daily_prize','1.00'),('weekly_prize','3.00'),
+        ('daily_prize_1','1.00'),('daily_prize_2','0.50'),('daily_prize_3','0.25'),
+        ('weekly_prize_1','3.00'),('weekly_prize_2','1.50'),('weekly_prize_3','0.75'),
         ('vip_price','5.00'),('vip_days','7')
     ]:
         cursor.execute('INSERT OR IGNORE INTO settings (key, value) VALUES (?,?)', (key, value))
@@ -207,7 +208,7 @@ def update_weekly_stats(user_id, amount):
     conn.commit()
     conn.close()
 
-def get_top_daily(limit=5):
+def get_top_daily(limit=10):
     today = get_msk_time().strftime('%Y-%m-%d')
     conn = sqlite3.connect('max_bot.db')
     c = conn.cursor()
@@ -216,7 +217,7 @@ def get_top_daily(limit=5):
     conn.close()
     return top
 
-def get_top_weekly(limit=5):
+def get_top_weekly(limit=10):
     conn = sqlite3.connect('max_bot.db')
     c = conn.cursor()
     c.execute('SELECT user_id, SUM(earned) as total FROM weekly_stats GROUP BY user_id ORDER BY total DESC LIMIT ?', (limit,))
@@ -299,6 +300,83 @@ def pay_referral_bonus(user_id, order_id):
         except: pass
     conn.close()
 
+# ==================== НАГРАДЫ ЗА ТОПЫ ====================
+
+def pay_daily_prizes():
+    logger.info("🏆 Выплата наград за топ дня...")
+    top = get_top_daily(3)
+    prizes = [
+        float(get_setting('daily_prize_1', '1.00')),
+        float(get_setting('daily_prize_2', '0.50')),
+        float(get_setting('daily_prize_3', '0.25'))
+    ]
+    
+    conn = sqlite3.connect('max_bot.db')
+    c = conn.cursor()
+    
+    for i, (uid, earned) in enumerate(top):
+        if i < len(prizes) and earned > 0:
+            prize = prizes[i]
+            c.execute('UPDATE users SET balance = balance + ? WHERE user_id = ?', (prize, uid))
+            c.execute('INSERT INTO transactions (user_id, amount, type, description) VALUES (?,?,"prize",?)',
+                     (uid, prize, f'🏆 Награда за {i+1} место в топе дня'))
+            try:
+                medals = ["🥇", "🥈", "🥉"]
+                bot.send_message(uid,
+                    f"🏆 <b>ПОЗДРАВЛЯЕМ!</b>\n\n"
+                    f"Вы заняли {medals[i]} <b>{i+1} место</b> в топе дня!\n"
+                    f"💰 Награда: <b>${prize:.2f}</b>\n\n"
+                    f"Средства зачислены на баланс!",
+                    parse_mode='HTML')
+            except: pass
+    
+    conn.commit()
+    conn.close()
+    logger.info("✅ Награды за топ дня выплачены")
+
+def pay_weekly_prizes():
+    logger.info("🌟 Выплата наград за топ недели...")
+    top = get_top_weekly(3)
+    prizes = [
+        float(get_setting('weekly_prize_1', '3.00')),
+        float(get_setting('weekly_prize_2', '1.50')),
+        float(get_setting('weekly_prize_3', '0.75'))
+    ]
+    
+    conn = sqlite3.connect('max_bot.db')
+    c = conn.cursor()
+    
+    for i, (uid, earned) in enumerate(top):
+        if i < len(prizes) and earned > 0:
+            prize = prizes[i]
+            c.execute('UPDATE users SET balance = balance + ? WHERE user_id = ?', (prize, uid))
+            c.execute('INSERT INTO transactions (user_id, amount, type, description) VALUES (?,?,"prize",?)',
+                     (uid, prize, f'🌟 Награда за {i+1} место в топе недели'))
+            try:
+                medals = ["🥇", "🥈", "🥉"]
+                bot.send_message(uid,
+                    f"🌟 <b>ПОЗДРАВЛЯЕМ!</b>\n\n"
+                    f"Вы заняли {medals[i]} <b>{i+1} место</b> в топе недели!\n"
+                    f"💰 Награда: <b>${prize:.2f}</b>\n\n"
+                    f"Средства зачислены на баланс!",
+                    parse_mode='HTML')
+            except: pass
+    
+    conn.commit()
+    conn.close()
+    logger.info("✅ Награды за топ недели выплачены")
+
+def schedule_prizes():
+    while True:
+        now = get_msk_time()
+        if now.hour == 0 and now.minute == 0:
+            pay_daily_prizes()
+            time.sleep(60)
+        if now.weekday() == 6 and now.hour == 23 and now.minute == 55:
+            pay_weekly_prizes()
+            time.sleep(60)
+        time.sleep(30)
+
 def get_main_keyboard():
     markup = types.InlineKeyboardMarkup(row_width=1)
     markup.add(
@@ -306,7 +384,9 @@ def get_main_keyboard():
         types.InlineKeyboardButton("👤 Мой профиль", callback_data='profile'),
         types.InlineKeyboardButton("📖 Инструкция", callback_data='instruction'),
         types.InlineKeyboardButton("🆘 Поддержка", callback_data='support'),
-        types.InlineKeyboardButton("💬 Наш чат", url=CHAT_LINK)
+        types.InlineKeyboardButton("💬 Наш чат", url=CHAT_LINK),
+        types.InlineKeyboardButton("🏆 Топ дня", callback_data='top_daily'),
+        types.InlineKeyboardButton("🌟 Топ недели", callback_data='top_weekly')
     )
     return markup
 
@@ -314,14 +394,41 @@ def show_main_menu(chat_id, message_id=None):
     code_price = float(get_setting('code_price','4.00'))
     qr_price = float(get_setting('qr_price','4.00'))
     is_work, work_status = get_work_time_status()
-    daily_prize = float(get_setting('daily_prize','1.00'))
-    weekly_prize = float(get_setting('weekly_prize','3.00'))
     
-    top_daily = get_top_daily(3)
-    daily_text = ""
+    menu_text = (
+        f"🏠 <b>ГЛАВНОЕ МЕНЮ</b>\n\n"
+        f"👋 Добро пожаловать в MaxBot!\nЛучший сервис для сдачи номеров\n\n"
+        f"{work_status}\n\n"
+        f"▫️ Сдача по коду: <b>${code_price:.2f}</b>\n"
+        f"▫️ Сдача по QR: <b>${qr_price:.2f}</b>\n\n"
+        f"📍 Выберите действие:"
+    )
+    
+    markup = get_main_keyboard()
+    if message_id:
+        try: bot.edit_message_text(menu_text, chat_id, message_id, parse_mode='HTML', reply_markup=markup)
+        except: bot.send_message(chat_id, menu_text, parse_mode='HTML', reply_markup=markup)
+    else:
+        bot.send_message(chat_id, menu_text, parse_mode='HTML', reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data == 'top_daily')
+def show_top_daily(call):
+    p1 = float(get_setting('daily_prize_1','1.00'))
+    p2 = float(get_setting('daily_prize_2','0.50'))
+    p3 = float(get_setting('daily_prize_3','0.25'))
+    top_daily = get_top_daily(10)
+    
+    text = (
+        f"🏆 <b>ТОП ДНЯ</b>\n\n"
+        f"💰 Награды:\n"
+        f"🥇 1 место: <b>${p1:.2f}</b>\n"
+        f"🥈 2 место: <b>${p2:.2f}</b>\n"
+        f"🥉 3 место: <b>${p3:.2f}</b>\n\n"
+        f"📅 Начисление: каждый день в 00:00 МСК\n\n"
+    )
+    
     if top_daily:
-        daily_text = f"\n🏆 <b>ТОП ДНЯ</b> (награда ${daily_prize:.2f}):\n"
-        medals = ["🥇", "🥈", "🥉"]
+        medals = ["🥇", "🥈", "🥉"] + ["▫️"] * 7
         for i, (uid, earned) in enumerate(top_daily):
             conn = sqlite3.connect('max_bot.db')
             c = conn.cursor()
@@ -331,13 +438,39 @@ def show_main_menu(chat_id, message_id=None):
             username = user[0] if user else None
             hidden = hide_username(username)
             vip_badge = "👑 " if is_vip(uid) else ""
-            daily_text += f"{medals[i]} {vip_badge}{hidden}: <b>${earned:.2f}</b>\n"
+            text += f"{medals[i]} {vip_badge}{hidden}: <b>${earned:.2f}</b>\n"
+    else:
+        text += "Пока нет данных за сегодня\n"
     
-    top_weekly = get_top_weekly(3)
-    weekly_text = ""
+    text += f"\n⏰ Обновлено: {get_msk_time().strftime('%H:%M:%S')} МСК"
+    
+    markup = types.InlineKeyboardMarkup()
+    markup.add(
+        types.InlineKeyboardButton("🔄 Обновить", callback_data='top_daily'),
+        types.InlineKeyboardButton("◀️ В меню", callback_data='back_to_menu')
+    )
+    
+    try: bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode='HTML', reply_markup=markup)
+    except: bot.send_message(call.message.chat.id, text, parse_mode='HTML', reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data == 'top_weekly')
+def show_top_weekly(call):
+    w1 = float(get_setting('weekly_prize_1','3.00'))
+    w2 = float(get_setting('weekly_prize_2','1.50'))
+    w3 = float(get_setting('weekly_prize_3','0.75'))
+    top_weekly = get_top_weekly(10)
+    
+    text = (
+        f"🌟 <b>ТОП НЕДЕЛИ</b>\n\n"
+        f"💰 Награды:\n"
+        f"🥇 1 место: <b>${w1:.2f}</b>\n"
+        f"🥈 2 место: <b>${w2:.2f}</b>\n"
+        f"🥉 3 место: <b>${w3:.2f}</b>\n\n"
+        f"📅 Начисление: воскресенье 23:55 МСК\n\n"
+    )
+    
     if top_weekly:
-        weekly_text = f"\n🌟 <b>ТОП НЕДЕЛИ</b> (награда ${weekly_prize:.2f}):\n"
-        medals = ["🥇", "🥈", "🥉"]
+        medals = ["🥇", "🥈", "🥉"] + ["▫️"] * 7
         for i, (uid, earned) in enumerate(top_weekly):
             conn = sqlite3.connect('max_bot.db')
             c = conn.cursor()
@@ -347,25 +480,20 @@ def show_main_menu(chat_id, message_id=None):
             username = user[0] if user else None
             hidden = hide_username(username)
             vip_badge = "👑 " if is_vip(uid) else ""
-            weekly_text += f"{medals[i]} {vip_badge}{hidden}: <b>${earned:.2f}</b>\n"
+            text += f"{medals[i]} {vip_badge}{hidden}: <b>${earned:.2f}</b>\n"
+    else:
+        text += "Пока нет данных за неделю\n"
     
-    menu_text = (
-        f"🏠 <b>ГЛАВНОЕ МЕНЮ</b>\n\n"
-        f"👋 Добро пожаловать в MaxBot!\nЛучший сервис для сдачи номеров\n\n"
-        f"{work_status}\n\n"
-        f"▫️ Сдача по коду: <b>${code_price:.2f}</b>\n"
-        f"▫️ Сдача по QR: <b>${qr_price:.2f}</b>"
-        f"{daily_text}"
-        f"{weekly_text}"
-        f"\n📍 Выберите действие:"
+    text += f"\n⏰ Обновлено: {get_msk_time().strftime('%H:%M:%S')} МСК"
+    
+    markup = types.InlineKeyboardMarkup()
+    markup.add(
+        types.InlineKeyboardButton("🔄 Обновить", callback_data='top_weekly'),
+        types.InlineKeyboardButton("◀️ В меню", callback_data='back_to_menu')
     )
     
-    markup = get_main_keyboard()
-    if message_id:
-        try: bot.edit_message_text(menu_text, chat_id, message_id, parse_mode='HTML', reply_markup=markup)
-        except: bot.send_message(chat_id, menu_text, parse_mode='HTML', reply_markup=markup)
-    else:
-        bot.send_message(chat_id, menu_text, parse_mode='HTML', reply_markup=markup)
+    try: bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode='HTML', reply_markup=markup)
+    except: bot.send_message(call.message.chat.id, text, parse_mode='HTML', reply_markup=markup)
 
 @bot.message_handler(commands=['start'])
 def start_command(message):
@@ -801,8 +929,6 @@ def akk_command(message):
 def get_next_code(call):
     conn = sqlite3.connect('max_bot.db')
     c = conn.cursor()
-    
-    # Сначала VIP
     c.execute('''
         SELECT cq.id, cq.user_id, cq.phone_number 
         FROM code_queue cq 
@@ -887,7 +1013,6 @@ def process_code_input(message):
         thread_id = None
         if hasattr(bot, 'order_threads') and oid in bot.order_threads: thread_id = bot.order_threads[oid]
         
-        # Проверяем VIP владельца
         conn2 = sqlite3.connect('max_bot.db')
         c2 = conn2.cursor()
         c2.execute('SELECT user_id FROM code_queue WHERE id=?', (oid,))
@@ -1020,8 +1145,6 @@ def process_password(message):
 def get_next_qr(call):
     conn = sqlite3.connect('max_bot.db')
     c = conn.cursor()
-    
-    # Сначала VIP
     c.execute('''
         SELECT qr.id, qr.user_id 
         FROM qr_queue qr 
@@ -1488,40 +1611,64 @@ def process_admin_settings(message):
 @bot.callback_query_handler(func=lambda call: call.data == 'admin_prizes')
 def admin_prizes_menu(call):
     if not is_admin(call.from_user.id): return
-    daily = float(get_setting('daily_prize','1.00'))
-    weekly = float(get_setting('weekly_prize','3.00'))
-    text = f"🏆 <b>НАСТРОЙКА НАГРАД</b>\n\n📅 Топ дня: <b>${daily:.2f}</b>\n📅 Топ недели: <b>${weekly:.2f}</b>\n\nВыберите что изменить:"
+    d1 = float(get_setting('daily_prize_1','1.00')); d2 = float(get_setting('daily_prize_2','0.50')); d3 = float(get_setting('daily_prize_3','0.25'))
+    w1 = float(get_setting('weekly_prize_1','3.00')); w2 = float(get_setting('weekly_prize_2','1.50')); w3 = float(get_setting('weekly_prize_3','0.75'))
+    text = (
+        f"🏆 <b>НАСТРОЙКА НАГРАД</b>\n\n"
+        f"📅 <b>Топ дня:</b>\n🥇 1 место: <b>${d1:.2f}</b>\n🥈 2 место: <b>${d2:.2f}</b>\n🥉 3 место: <b>${d3:.2f}</b>\n\n"
+        f"🌟 <b>Топ недели:</b>\n🥇 1 место: <b>${w1:.2f}</b>\n🥈 2 место: <b>${w2:.2f}</b>\n🥉 3 место: <b>${w3:.2f}</b>\n\n"
+        f"Выберите что изменить:"
+    )
     markup = types.InlineKeyboardMarkup(row_width=1)
-    markup.add(types.InlineKeyboardButton("💰 Награда дня", callback_data='admin_set_daily_prize'), types.InlineKeyboardButton("💰 Награда недели", callback_data='admin_set_weekly_prize'), types.InlineKeyboardButton("◀️ Назад", callback_data='admin_back'))
+    markup.add(
+        types.InlineKeyboardButton("📅 1 место дня", callback_data='admin_set_daily_1'),
+        types.InlineKeyboardButton("📅 2 место дня", callback_data='admin_set_daily_2'),
+        types.InlineKeyboardButton("📅 3 место дня", callback_data='admin_set_daily_3'),
+        types.InlineKeyboardButton("🌟 1 место недели", callback_data='admin_set_weekly_1'),
+        types.InlineKeyboardButton("🌟 2 место недели", callback_data='admin_set_weekly_2'),
+        types.InlineKeyboardButton("🌟 3 место недели", callback_data='admin_set_weekly_3'),
+        types.InlineKeyboardButton("◀️ Назад", callback_data='admin_back')
+    )
     try: bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode='HTML', reply_markup=markup)
     except: bot.send_message(call.message.chat.id, text, parse_mode='HTML', reply_markup=markup)
 
-@bot.callback_query_handler(func=lambda call: call.data in ['admin_set_daily_prize', 'admin_set_weekly_prize'])
-def admin_set_prize(call):
+@bot.callback_query_handler(func=lambda call: call.data in [
+    'admin_set_daily_1','admin_set_daily_2','admin_set_daily_3',
+    'admin_set_weekly_1','admin_set_weekly_2','admin_set_weekly_3'
+])
+def admin_set_prize_value(call):
     if not is_admin(call.from_user.id): return
-    if call.data == 'admin_set_daily_prize':
-        user_states[call.from_user.id] = {'state': 'admin_setting_daily_prize'}; cur = float(get_setting('daily_prize','1.00'))
-        text = f"📅 <b>НАГРАДА ДНЯ</b>\n\nТекущая: ${cur:.2f}\n\n📝 Отправьте новую сумму:"
-    else:
-        user_states[call.from_user.id] = {'state': 'admin_setting_weekly_prize'}; cur = float(get_setting('weekly_prize','3.00'))
-        text = f"📅 <b>НАГРАДА НЕДЕЛИ</b>\n\nТекущая: ${cur:.2f}\n\n📝 Отправьте новую сумму:"
+    settings_map = {
+        'admin_set_daily_1': ('admin_setting_prize', 'daily_prize_1', '1 место дня'),
+        'admin_set_daily_2': ('admin_setting_prize', 'daily_prize_2', '2 место дня'),
+        'admin_set_daily_3': ('admin_setting_prize', 'daily_prize_3', '3 место дня'),
+        'admin_set_weekly_1': ('admin_setting_prize', 'weekly_prize_1', '1 место недели'),
+        'admin_set_weekly_2': ('admin_setting_prize', 'weekly_prize_2', '2 место недели'),
+        'admin_set_weekly_3': ('admin_setting_prize', 'weekly_prize_3', '3 место недели'),
+    }
+    state, key, name = settings_map[call.data]
+    cur = float(get_setting(key, '1.00'))
+    user_states[call.from_user.id] = {'state': state, 'key': key, 'name': name}
+    text = f"💰 <b>НАГРАДА: {name.upper()}</b>\n\nТекущая: ${cur:.2f}\n\n📝 Отправьте новую сумму:"
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("❌ Отмена", callback_data='admin_prizes'))
     try: bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode='HTML', reply_markup=markup)
     except: bot.send_message(call.message.chat.id, text, parse_mode='HTML', reply_markup=markup)
 
-@bot.message_handler(func=lambda m: user_states.get(m.from_user.id,{}).get('state') in ['admin_setting_daily_prize', 'admin_setting_weekly_prize'])
-def process_admin_prize(message):
+@bot.message_handler(func=lambda m: user_states.get(m.from_user.id,{}).get('state')=='admin_setting_prize')
+def process_admin_prize_value(message):
     if not is_admin(message.from_user.id): return
-    state = user_states[message.from_user.id]['state']
+    us = user_states[message.from_user.id]
+    key = us['key']
+    name = us['name']
     del user_states[message.from_user.id]
     try:
         val = float(message.text.strip())
         if val < 0: bot.reply_to(message, "❌ Сумма должна быть положительной"); return
     except: bot.reply_to(message, "❌ Введите число"); return
-    if state == 'admin_setting_daily_prize': update_setting('daily_prize', str(val)); name = f"Награда дня: ${val:.2f}"
-    else: update_setting('weekly_prize', str(val)); name = f"Награда недели: ${val:.2f}"
-    bot.reply_to(message, f"✅ <b>Обновлено!</b>\n\n{name}", parse_mode='HTML', reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("◀️ К наградам", callback_data='admin_prizes')))
+    update_setting(key, str(val))
+    bot.reply_to(message, f"✅ <b>Обновлено!</b>\n\n{name}: ${val:.2f}", parse_mode='HTML',
+                 reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("◀️ К наградам", callback_data='admin_prizes')))
 
 @bot.callback_query_handler(func=lambda call: call.data == 'admin_vip_settings')
 def admin_vip_settings(call):
@@ -1960,6 +2107,8 @@ def main_callback(call):
     elif data == 'profile': show_profile(call.message)
     elif data == 'back_to_menu': show_main_menu(call.message.chat.id, call.message.message_id)
     elif data == 'back_to_sell': show_sell_options(call.message)
+    elif data == 'top_daily': show_top_daily(call)
+    elif data == 'top_weekly': show_top_weekly(call)
     elif data == 'get_code': get_next_code(call)
     elif data == 'get_qr': get_next_qr(call)
     elif data.startswith('send_code_'): handle_send_code(call)
@@ -1986,6 +2135,9 @@ if __name__ == '__main__':
     print(f"📱 Работает во всех топиках")
     if PRIVATE_CHANNEL: print(f"🔒 Частный канал")
     else: print(f"📢 Публичный канал")
+    
+    prize_thread = threading.Thread(target=schedule_prizes, daemon=True)
+    prize_thread.start()
     
     while True:
         try:
