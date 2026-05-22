@@ -42,7 +42,8 @@ def init_db():
             success_orders INTEGER DEFAULT 0, cancelled_orders INTEGER DEFAULT 0,
             registration_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             last_activity TIMESTAMP DEFAULT CURRENT_TIMESTAMP, is_blocked BOOLEAN DEFAULT 0,
-            referral_code TEXT, referral_earnings REAL DEFAULT 0
+            referral_code TEXT, referral_earnings REAL DEFAULT 0,
+            vip_until TIMESTAMP, vip_priority BOOLEAN DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS code_queue (
             id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, phone_number TEXT,
@@ -78,11 +79,21 @@ def init_db():
             total_earned REAL DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE TABLE IF NOT EXISTS daily_stats (
+            user_id INTEGER, date TEXT, earned REAL DEFAULT 0,
+            PRIMARY KEY (user_id, date)
+        );
+        CREATE TABLE IF NOT EXISTS weekly_stats (
+            user_id INTEGER, date TEXT, earned REAL DEFAULT 0,
+            PRIMARY KEY (user_id, date)
+        );
     ''')
     for key, value in [
         ('code_price','4.00'),('qr_price','4.00'),('min_withdraw','1.00'),
         ('hold_time','300'),('referral_bonus','0.10'),('notify_before_queue','3'),
-        ('work_start','8'),('work_end','20')
+        ('work_start','8'),('work_end','20'),
+        ('daily_prize','1.00'),('weekly_prize','3.00'),
+        ('vip_price','5.00'),('vip_days','7')
     ]:
         cursor.execute('INSERT OR IGNORE INTO settings (key, value) VALUES (?,?)', (key, value))
     conn.commit()
@@ -132,6 +143,93 @@ def get_work_time_status():
         else:
             return False, f"🔴 <b>Нерабочее время</b>\n\n🌙 Бот закрыт до {start}:00 МСК\n⏰ Сейчас: {now.strftime('%H:%M')} МСК"
 
+def is_vip(user_id):
+    conn = sqlite3.connect('max_bot.db')
+    c = conn.cursor()
+    c.execute('SELECT vip_until FROM users WHERE user_id=?', (user_id,))
+    result = c.fetchone()
+    conn.close()
+    if result and result[0]:
+        try:
+            vip_until = datetime.strptime(result[0], '%Y-%m-%d %H:%M:%S')
+            return vip_until > datetime.now()
+        except:
+            return False
+    return False
+
+def get_vip_days_left(user_id):
+    conn = sqlite3.connect('max_bot.db')
+    c = conn.cursor()
+    c.execute('SELECT vip_until FROM users WHERE user_id=?', (user_id,))
+    result = c.fetchone()
+    conn.close()
+    if result and result[0]:
+        try:
+            vip_until = datetime.strptime(result[0], '%Y-%m-%d %H:%M:%S')
+            now = datetime.now()
+            if vip_until > now:
+                delta = vip_until - now
+                return delta.days + 1
+        except:
+            pass
+    return 0
+
+def get_vip_prefix(user_id):
+    if is_vip(user_id):
+        return "👑 "
+    return ""
+
+def buy_vip(user_id):
+    vip_days = int(get_setting('vip_days', '7'))
+    vip_until = datetime.now() + timedelta(days=vip_days)
+    conn = sqlite3.connect('max_bot.db')
+    c = conn.cursor()
+    c.execute('UPDATE users SET vip_until=?, vip_priority=1 WHERE user_id=?', 
+              (vip_until.strftime('%Y-%m-%d %H:%M:%S'), user_id))
+    conn.commit()
+    conn.close()
+
+def update_daily_stats(user_id, amount):
+    today = get_msk_time().strftime('%Y-%m-%d')
+    conn = sqlite3.connect('max_bot.db')
+    c = conn.cursor()
+    c.execute('INSERT INTO daily_stats (user_id, date, earned) VALUES (?,?,?) ON CONFLICT(user_id, date) DO UPDATE SET earned = earned + ?', 
+              (user_id, today, amount, amount))
+    conn.commit()
+    conn.close()
+
+def update_weekly_stats(user_id, amount):
+    today = get_msk_time().strftime('%Y-%m-%d')
+    conn = sqlite3.connect('max_bot.db')
+    c = conn.cursor()
+    c.execute('INSERT INTO weekly_stats (user_id, date, earned) VALUES (?,?,?) ON CONFLICT(user_id, date) DO UPDATE SET earned = earned + ?', 
+              (user_id, today, amount, amount))
+    conn.commit()
+    conn.close()
+
+def get_top_daily(limit=5):
+    today = get_msk_time().strftime('%Y-%m-%d')
+    conn = sqlite3.connect('max_bot.db')
+    c = conn.cursor()
+    c.execute('SELECT user_id, earned FROM daily_stats WHERE date=? ORDER BY earned DESC LIMIT ?', (today, limit))
+    top = c.fetchall()
+    conn.close()
+    return top
+
+def get_top_weekly(limit=5):
+    conn = sqlite3.connect('max_bot.db')
+    c = conn.cursor()
+    c.execute('SELECT user_id, SUM(earned) as total FROM weekly_stats GROUP BY user_id ORDER BY total DESC LIMIT ?', (limit,))
+    top = c.fetchall()
+    conn.close()
+    return top
+
+def hide_username(username):
+    if not username: return "Пользователь"
+    half = len(username) // 2
+    if half == 0: return username + "***"
+    return username[:half] + "***"
+
 def get_queue_position(uid, qtype='code'):
     conn = sqlite3.connect('max_bot.db')
     c = conn.cursor()
@@ -162,13 +260,15 @@ def add_to_queue(uid, qtype='code', phone=None):
     conn.close()
     return True, "Добавлены в очередь"
 
-def send_to_group(text, markup=None, thread_id=None):
+def send_to_group(text, markup=None, thread_id=None, user_id=None):
+    prefix = get_vip_prefix(user_id) if user_id else ""
+    full_text = f"{prefix}{text}"
     try:
-        bot.send_message(GROUP_ID, text, parse_mode='HTML', reply_markup=markup, message_thread_id=thread_id)
+        bot.send_message(GROUP_ID, full_text, parse_mode='HTML', reply_markup=markup, message_thread_id=thread_id)
     except Exception as e:
         logger.error(f"Ошибка отправки в группу: {e}")
         try:
-            bot.send_message(GROUP_ID, text, parse_mode='HTML', reply_markup=markup)
+            bot.send_message(GROUP_ID, full_text, parse_mode='HTML', reply_markup=markup)
         except:
             pass
 
@@ -214,14 +314,52 @@ def show_main_menu(chat_id, message_id=None):
     code_price = float(get_setting('code_price','4.00'))
     qr_price = float(get_setting('qr_price','4.00'))
     is_work, work_status = get_work_time_status()
+    daily_prize = float(get_setting('daily_prize','1.00'))
+    weekly_prize = float(get_setting('weekly_prize','3.00'))
+    
+    top_daily = get_top_daily(3)
+    daily_text = ""
+    if top_daily:
+        daily_text = f"\n🏆 <b>ТОП ДНЯ</b> (награда ${daily_prize:.2f}):\n"
+        medals = ["🥇", "🥈", "🥉"]
+        for i, (uid, earned) in enumerate(top_daily):
+            conn = sqlite3.connect('max_bot.db')
+            c = conn.cursor()
+            c.execute('SELECT username FROM users WHERE user_id=?', (uid,))
+            user = c.fetchone()
+            conn.close()
+            username = user[0] if user else None
+            hidden = hide_username(username)
+            vip_badge = "👑 " if is_vip(uid) else ""
+            daily_text += f"{medals[i]} {vip_badge}{hidden}: <b>${earned:.2f}</b>\n"
+    
+    top_weekly = get_top_weekly(3)
+    weekly_text = ""
+    if top_weekly:
+        weekly_text = f"\n🌟 <b>ТОП НЕДЕЛИ</b> (награда ${weekly_prize:.2f}):\n"
+        medals = ["🥇", "🥈", "🥉"]
+        for i, (uid, earned) in enumerate(top_weekly):
+            conn = sqlite3.connect('max_bot.db')
+            c = conn.cursor()
+            c.execute('SELECT username FROM users WHERE user_id=?', (uid,))
+            user = c.fetchone()
+            conn.close()
+            username = user[0] if user else None
+            hidden = hide_username(username)
+            vip_badge = "👑 " if is_vip(uid) else ""
+            weekly_text += f"{medals[i]} {vip_badge}{hidden}: <b>${earned:.2f}</b>\n"
+    
     menu_text = (
         f"🏠 <b>ГЛАВНОЕ МЕНЮ</b>\n\n"
         f"👋 Добро пожаловать в MaxBot!\nЛучший сервис для сдачи номеров\n\n"
         f"{work_status}\n\n"
         f"▫️ Сдача по коду: <b>${code_price:.2f}</b>\n"
-        f"▫️ Сдача по QR: <b>${qr_price:.2f}</b>\n\n"
-        f"📍 Выберите действие:"
+        f"▫️ Сдача по QR: <b>${qr_price:.2f}</b>"
+        f"{daily_text}"
+        f"{weekly_text}"
+        f"\n📍 Выберите действие:"
     )
+    
     markup = get_main_keyboard()
     if message_id:
         try: bot.edit_message_text(menu_text, chat_id, message_id, parse_mode='HTML', reply_markup=markup)
@@ -374,7 +512,9 @@ def process_phone_number(message):
         bot.send_message(message.chat.id,
             f"✅ <b>Номер принят!</b>\n\n📱 <code>{phone}</code>\n📍 Позиция в очереди: <b>{position}</b>\n💰 Оплата: <b>${code_price:.2f}</b>\n\n📨 Номер передан обработчику\n⏱ Ожидайте код подтверждения",
             parse_mode='HTML', reply_markup=markup)
-        send_to_group(f"🔔 <b>НОВЫЙ НОМЕР</b>\n\n📱 <code>{phone}</code>\n👤 @{message.from_user.username or 'Нет'}\n📍 Позиция: {position}\n\n/akk — взять в работу")
+        send_to_group(
+            f"🔔 <b>НОВЫЙ НОМЕР</b>\n\n📱 <code>{phone}</code>\n👤 @{message.from_user.username or 'Нет'}\n📍 Позиция: {position}\n\n/akk — взять в работу",
+            user_id=message.from_user.id)
     else:
         markup = types.InlineKeyboardMarkup()
         markup.add(types.InlineKeyboardButton("◀️ В меню", callback_data='back_to_menu'))
@@ -402,7 +542,9 @@ def confirm_qr_sell(call):
         markup.add(types.InlineKeyboardButton("◀️ В меню", callback_data='back_to_menu'))
         try: bot.edit_message_text(f"✅ <b>Заявка создана</b>\n\n📍 Позиция в очереди: <b>{position}</b>\n\n📷 Ожидайте QR-код\n⏱ Скоро вам отправят", call.message.chat.id, call.message.message_id, parse_mode='HTML', reply_markup=markup)
         except: bot.send_message(call.message.chat.id, f"✅ <b>Заявка создана</b>\n\n📍 Позиция: <b>{position}</b>\n\n📷 Ожидайте QR-код", parse_mode='HTML', reply_markup=markup)
-        send_to_group(f"🔔 <b>НОВЫЙ QR</b>\n\n👤 @{call.from_user.username or 'Нет'}\n📍 Позиция: {position}\n\n/akk — взять в работу")
+        send_to_group(
+            f"🔔 <b>НОВЫЙ QR</b>\n\n👤 @{call.from_user.username or 'Нет'}\n📍 Позиция: {position}\n\n/akk — взять в работу",
+            user_id=call.from_user.id)
     else:
         bot.answer_callback_query(call.id, msg, show_alert=True)
 
@@ -456,8 +598,16 @@ def show_profile(message):
     
     status_text = 'Активен' if ip > 0 else 'Ожидает'
     
+    vip_status = ""
+    if is_vip(message.chat.id):
+        days = get_vip_days_left(message.chat.id)
+        vip_status = f"👑 VIP: ✅ Активен ({days} дн.)\n"
+    else:
+        vip_status = "👑 VIP: ❌ Неактивен\n"
+    
     text = (
         f"👤 <b>МОЙ ПРОФИЛЬ</b>\n\n"
+        f"{vip_status}"
         f"<b>Информация</b>\n"
         f"├─ ID: <code>{user[0]}</code>\n"
         f"├─ @{user[1] or 'Не указан'}\n"
@@ -490,6 +640,9 @@ def show_profile(message):
     if pw > 0: text += f"\n\nЗаявок на вывод: {pw}"
     
     markup = types.InlineKeyboardMarkup(row_width=1)
+    if not is_vip(message.chat.id):
+        vip_price = float(get_setting('vip_price', '5.00'))
+        markup.add(types.InlineKeyboardButton(f"👑 Купить VIP за ${vip_price:.2f}", callback_data='buy_vip'))
     if user[2] > 0: markup.add(types.InlineKeyboardButton("💳 Вывести средства", callback_data='withdraw'))
     markup.add(types.InlineKeyboardButton("🎯 Рефералы", callback_data='ref_info'))
     markup.add(types.InlineKeyboardButton("◀️ В меню", callback_data='back_to_menu'))
@@ -502,6 +655,95 @@ def show_profile(message):
             bot.send_message(message.chat.id, text, parse_mode='HTML', reply_markup=markup)
         except:
             bot.send_message(message.chat.id, "❌ Ошибка загрузки профиля.", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data == 'buy_vip')
+def vip_buy_request(call):
+    if is_vip(call.from_user.id):
+        days = get_vip_days_left(call.from_user.id)
+        bot.answer_callback_query(call.id, f"✅ VIP уже активен! Осталось {days} дн.", show_alert=True)
+        return
+    
+    vip_price = float(get_setting('vip_price', '5.00'))
+    vip_days = int(get_setting('vip_days', '7'))
+    
+    conn = sqlite3.connect('max_bot.db')
+    c = conn.cursor()
+    c.execute('SELECT balance FROM users WHERE user_id=?', (call.from_user.id,))
+    user = c.fetchone()
+    conn.close()
+    
+    if not user or user[0] < vip_price:
+        bot.answer_callback_query(call.id, f"❌ Недостаточно средств! Нужно ${vip_price:.2f}", show_alert=True)
+        return
+    
+    text = (
+        f"👑 <b>ПОКУПКА VIP СТАТУСА</b>\n\n"
+        f"💎 Цена: <b>${vip_price:.2f}</b>\n"
+        f"📅 Срок: <b>{vip_days} дней</b>\n\n"
+        f"🎯 <b>Преимущества VIP:</b>\n"
+        f"├─ 🥇 Приоритет в очереди\n"
+        f"├─ 📱 Ваши номера всегда первые\n"
+        f"├─ 👑 Префикс [VIP] в чате\n"
+        f"├─ ⭐ Особая метка в профиле\n"
+        f"└─ 🔔 Уведомление холодникам\n\n"
+        f"💰 Ваш баланс: <b>${user[0]:.2f}</b>\n\n"
+        f"Подтвердите покупку:"
+    )
+    
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("✅ Купить", callback_data='confirm_buy_vip'),
+        types.InlineKeyboardButton("❌ Отмена", callback_data='profile')
+    )
+    
+    try: bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode='HTML', reply_markup=markup)
+    except: bot.send_message(call.message.chat.id, text, parse_mode='HTML', reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data == 'confirm_buy_vip')
+def confirm_vip_purchase(call):
+    vip_price = float(get_setting('vip_price', '5.00'))
+    
+    conn = sqlite3.connect('max_bot.db')
+    c = conn.cursor()
+    c.execute('SELECT balance FROM users WHERE user_id=?', (call.from_user.id,))
+    user = c.fetchone()
+    
+    if not user or user[0] < vip_price:
+        bot.answer_callback_query(call.id, "❌ Недостаточно средств!", show_alert=True)
+        conn.close()
+        return
+    
+    c.execute('UPDATE users SET balance=balance-? WHERE user_id=?', (vip_price, call.from_user.id))
+    conn.commit()
+    conn.close()
+    
+    buy_vip(call.from_user.id)
+    
+    conn = sqlite3.connect('max_bot.db')
+    c = conn.cursor()
+    c.execute('INSERT INTO transactions (user_id, amount, type, description) VALUES (?,?,"vip",?)', 
+              (call.from_user.id, vip_price, 'Покупка VIP статуса'))
+    conn.commit()
+    conn.close()
+    
+    text = (
+        f"✅ <b>VIP СТАТУС АКТИВИРОВАН!</b>\n\n"
+        f"👑 Теперь вы VIP пользователь!\n"
+        f"📅 Срок: {get_setting('vip_days','7')} дней\n\n"
+        f"🎯 <b>Ваши преимущества:</b>\n"
+        f"├─ 🥇 Приоритет в очереди\n"
+        f"├─ 👑 Префикс [VIP] в чате\n"
+        f"└─ ⭐ Особая метка в профиле\n\n"
+        f"💎 Спасибо за покупку!"
+    )
+    
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("◀️ В профиль", callback_data='profile'))
+    
+    try: bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode='HTML', reply_markup=markup)
+    except: bot.send_message(call.message.chat.id, text, parse_mode='HTML', reply_markup=markup)
+    
+    bot.answer_callback_query(call.id, "✅ VIP активирован!")
 
 @bot.callback_query_handler(func=lambda call: call.data == 'ref_info')
 def ref_info(call):
@@ -559,18 +801,35 @@ def akk_command(message):
 def get_next_code(call):
     conn = sqlite3.connect('max_bot.db')
     c = conn.cursor()
-    c.execute('SELECT id, user_id, phone_number FROM code_queue WHERE status="waiting" ORDER BY id ASC LIMIT 1')
+    
+    # Сначала VIP
+    c.execute('''
+        SELECT cq.id, cq.user_id, cq.phone_number 
+        FROM code_queue cq 
+        JOIN users u ON cq.user_id = u.user_id 
+        WHERE cq.status="waiting" AND u.vip_priority=1 AND u.vip_until > datetime('now')
+        ORDER BY cq.id ASC LIMIT 1
+    ''')
     code = c.fetchone()
+    
+    if not code:
+        c.execute('SELECT id, user_id, phone_number FROM code_queue WHERE status="waiting" ORDER BY id ASC LIMIT 1')
+        code = c.fetchone()
+    
     if code:
         thread_id = call.message.message_thread_id if hasattr(call.message, 'message_thread_id') else None
         c.execute('UPDATE code_queue SET status="taken", taken_by=?, taken_at=CURRENT_TIMESTAMP WHERE id=?', (call.from_user.id, code[0]))
         conn.commit()
         if not hasattr(bot, 'order_threads'): bot.order_threads = {}
         bot.order_threads[code[0]] = thread_id
+        
+        is_user_vip = is_vip(code[1])
+        vip_badge = " 👑 VIP" if is_user_vip else ""
+        
         markup = types.InlineKeyboardMarkup(row_width=2)
         markup.add(types.InlineKeyboardButton("📤 Отправил код", callback_data=f'send_code_{code[0]}'), types.InlineKeyboardButton("⏭ Пропустить", callback_data=f'skip_code_{code[0]}'))
         bot.edit_message_text(
-            f"📱 <b>ЗАЯВКА #{code[0]}</b>\n\n"
+            f"📱 <b>ЗАЯВКА #{code[0]}{vip_badge}</b>\n\n"
             f"Номер: <code>{code[2]}</code>\n\n1️⃣ Отправьте код на номер\n2️⃣ Нажмите «Отправил код»\n3️⃣ Пользователь введет код\n\n⏭ Пропустить — вернуть в очередь",
             call.message.chat.id, call.message.message_id, parse_mode='HTML', reply_markup=markup)
         try: bot.send_message(code[1], "📨 <b>Номер взят в работу</b>\n\nОжидайте SMS с кодом\n⏱ 5-10 минут", parse_mode='HTML')
@@ -627,6 +886,16 @@ def process_code_input(message):
     if order and order[0]:
         thread_id = None
         if hasattr(bot, 'order_threads') and oid in bot.order_threads: thread_id = bot.order_threads[oid]
+        
+        # Проверяем VIP владельца
+        conn2 = sqlite3.connect('max_bot.db')
+        c2 = conn2.cursor()
+        c2.execute('SELECT user_id FROM code_queue WHERE id=?', (oid,))
+        owner = c2.fetchone()
+        is_owner_vip = is_vip(owner[0]) if owner else False
+        conn2.close()
+        vip_badge = " 👑 VIP" if is_owner_vip else ""
+        
         markup = types.InlineKeyboardMarkup(row_width=2)
         markup.add(
             types.InlineKeyboardButton("✅ Встал", callback_data=f'code_success_{oid}'),
@@ -635,7 +904,7 @@ def process_code_input(message):
         )
         markup.add(types.InlineKeyboardButton("📤 Отправил код", callback_data=f'send_code_{oid}'))
         send_to_group(
-            f"🔑 <b>ПОЛУЧЕН КОД</b>\n\n"
+            f"🔑 <b>ПОЛУЧЕН КОД{vip_badge}</b>\n\n"
             f"📱 Номер: <code>{order[1]}</code>\n🔢 Код: <code>{code}</code>\n📋 Заявка: #{oid}\n\n"
             f"✅ Встал — вход выполнен\n🔐 Пароль — запрос пароля\n⏭ Пропустить — проблема\n📤 Отправил код — запросить повторно",
             markup=markup, thread_id=thread_id)
@@ -751,17 +1020,34 @@ def process_password(message):
 def get_next_qr(call):
     conn = sqlite3.connect('max_bot.db')
     c = conn.cursor()
-    c.execute('SELECT id, user_id FROM qr_queue WHERE status="waiting" ORDER BY id ASC LIMIT 1')
+    
+    # Сначала VIP
+    c.execute('''
+        SELECT qr.id, qr.user_id 
+        FROM qr_queue qr 
+        JOIN users u ON qr.user_id = u.user_id 
+        WHERE qr.status="waiting" AND u.vip_priority=1 AND u.vip_until > datetime('now')
+        ORDER BY qr.id ASC LIMIT 1
+    ''')
     qr = c.fetchone()
+    
+    if not qr:
+        c.execute('SELECT id, user_id FROM qr_queue WHERE status="waiting" ORDER BY id ASC LIMIT 1')
+        qr = c.fetchone()
+    
     if qr:
         thread_id = call.message.message_thread_id if hasattr(call.message, 'message_thread_id') else None
         c.execute('UPDATE qr_queue SET status="taken", taken_by=?, taken_at=CURRENT_TIMESTAMP WHERE id=?', (call.from_user.id, qr[0]))
         conn.commit()
         if not hasattr(bot, 'order_threads'): bot.order_threads = {}
         bot.order_threads[qr[0]] = thread_id
+        
+        is_user_vip = is_vip(qr[1])
+        vip_badge = " 👑 VIP" if is_user_vip else ""
+        
         user_states[call.from_user.id] = {'state': 'waiting_qr_photo', 'qr_id': qr[0], 'user_id': qr[1]}
         bot.edit_message_text(
-            f"📷 <b>ЗАЯВКА #{qr[0]}</b>\n\n"
+            f"📷 <b>ЗАЯВКА #{qr[0]}{vip_badge}</b>\n\n"
             f"👤 Пользователь: {qr[1]}\n\n📸 Отправьте фото QR-кода\n📎 <b>ОТВЕТОМ</b> на это сообщение\n\n⏭ Пропустить — вернуть в очередь",
             call.message.chat.id, call.message.message_id, parse_mode='HTML')
         try: bot.send_message(qr[1], "📷 <b>QR в обработке</b>\n\nСкоро вам отправят QR-код", parse_mode='HTML')
@@ -1039,7 +1325,8 @@ def process_hold_payment(user_id, order_id, amount, order_type='code'):
             else: is_completed = (status == 'completed')
         logger.info(f"📊 Номер #{order_id}: status={status}, is_completed={is_completed}")
         if is_completed:
-            c.execute('UPDATE users SET balance=balance+?, hold_balance=hold_balance-?, total_earned=total_earned+? WHERE user_id=?', (amount, amount, amount, user_id))
+            c.execute('UPDATE users SET balance = balance + ?, hold_balance = hold_balance - ?, total_earned = total_earned + ? WHERE user_id = ?', 
+                      (amount, amount, amount, user_id))
             if order_type == 'code' and len(order) > 1 and order[1]: desc = f'📱 {order[1]} — ${amount:.2f}'
             else: desc = f'📷 QR-код — ${amount:.2f}'
             c.execute('INSERT INTO transactions (user_id, amount, type, description) VALUES (?,?,"income",?)', (user_id, amount, desc))
@@ -1055,6 +1342,8 @@ def process_hold_payment(user_id, order_id, amount, order_type='code'):
             try: bot.send_message(user_id, text, parse_mode='HTML')
             except: pass
             pay_referral_bonus(user_id, order_id)
+            update_daily_stats(user_id, amount)
+            update_weekly_stats(user_id, amount)
         conn.close()
     except Exception as e: logger.error(f"Ошибка начисления: {e}")
 
@@ -1141,7 +1430,9 @@ def admin_command(message):
         types.InlineKeyboardButton("🧹 Очистка", callback_data='admin_clear_queue'),
         types.InlineKeyboardButton("📢 Рассылка", callback_data='admin_broadcast'),
         types.InlineKeyboardButton("🔍 Поиск", callback_data='admin_search'),
-        types.InlineKeyboardButton("🕐 Время работы", callback_data='admin_work_time')
+        types.InlineKeyboardButton("🕐 Время работы", callback_data='admin_work_time'),
+        types.InlineKeyboardButton("🏆 Награды", callback_data='admin_prizes'),
+        types.InlineKeyboardButton("👑 VIP", callback_data='admin_vip_settings')
     )
     bot.send_message(message.chat.id,
         f"👑 <b>АДМИН-ПАНЕЛЬ</b>\n\n"
@@ -1193,6 +1484,82 @@ def process_admin_settings(message):
         if val < 1 or val > 60: bot.reply_to(message, "❌ 1-60 мин"); return
         update_setting('hold_time', int(val * 60)); name = f"холд ({int(val)} мин)"
     bot.reply_to(message, f"✅ Обновлено!\n📝 {name}: {val}", parse_mode='HTML', reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("◀️ К настройкам", callback_data='admin_settings')))
+
+@bot.callback_query_handler(func=lambda call: call.data == 'admin_prizes')
+def admin_prizes_menu(call):
+    if not is_admin(call.from_user.id): return
+    daily = float(get_setting('daily_prize','1.00'))
+    weekly = float(get_setting('weekly_prize','3.00'))
+    text = f"🏆 <b>НАСТРОЙКА НАГРАД</b>\n\n📅 Топ дня: <b>${daily:.2f}</b>\n📅 Топ недели: <b>${weekly:.2f}</b>\n\nВыберите что изменить:"
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    markup.add(types.InlineKeyboardButton("💰 Награда дня", callback_data='admin_set_daily_prize'), types.InlineKeyboardButton("💰 Награда недели", callback_data='admin_set_weekly_prize'), types.InlineKeyboardButton("◀️ Назад", callback_data='admin_back'))
+    try: bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode='HTML', reply_markup=markup)
+    except: bot.send_message(call.message.chat.id, text, parse_mode='HTML', reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data in ['admin_set_daily_prize', 'admin_set_weekly_prize'])
+def admin_set_prize(call):
+    if not is_admin(call.from_user.id): return
+    if call.data == 'admin_set_daily_prize':
+        user_states[call.from_user.id] = {'state': 'admin_setting_daily_prize'}; cur = float(get_setting('daily_prize','1.00'))
+        text = f"📅 <b>НАГРАДА ДНЯ</b>\n\nТекущая: ${cur:.2f}\n\n📝 Отправьте новую сумму:"
+    else:
+        user_states[call.from_user.id] = {'state': 'admin_setting_weekly_prize'}; cur = float(get_setting('weekly_prize','3.00'))
+        text = f"📅 <b>НАГРАДА НЕДЕЛИ</b>\n\nТекущая: ${cur:.2f}\n\n📝 Отправьте новую сумму:"
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("❌ Отмена", callback_data='admin_prizes'))
+    try: bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode='HTML', reply_markup=markup)
+    except: bot.send_message(call.message.chat.id, text, parse_mode='HTML', reply_markup=markup)
+
+@bot.message_handler(func=lambda m: user_states.get(m.from_user.id,{}).get('state') in ['admin_setting_daily_prize', 'admin_setting_weekly_prize'])
+def process_admin_prize(message):
+    if not is_admin(message.from_user.id): return
+    state = user_states[message.from_user.id]['state']
+    del user_states[message.from_user.id]
+    try:
+        val = float(message.text.strip())
+        if val < 0: bot.reply_to(message, "❌ Сумма должна быть положительной"); return
+    except: bot.reply_to(message, "❌ Введите число"); return
+    if state == 'admin_setting_daily_prize': update_setting('daily_prize', str(val)); name = f"Награда дня: ${val:.2f}"
+    else: update_setting('weekly_prize', str(val)); name = f"Награда недели: ${val:.2f}"
+    bot.reply_to(message, f"✅ <b>Обновлено!</b>\n\n{name}", parse_mode='HTML', reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("◀️ К наградам", callback_data='admin_prizes')))
+
+@bot.callback_query_handler(func=lambda call: call.data == 'admin_vip_settings')
+def admin_vip_settings(call):
+    if not is_admin(call.from_user.id): return
+    vip_price = float(get_setting('vip_price','5.00'))
+    vip_days = int(get_setting('vip_days','7'))
+    text = f"👑 <b>НАСТРОЙКА VIP</b>\n\n💰 Цена: <b>${vip_price:.2f}</b>\n📅 Дней: <b>{vip_days}</b>\n\nВыберите что изменить:"
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    markup.add(types.InlineKeyboardButton("💰 Изменить цену", callback_data='admin_set_vip_price'), types.InlineKeyboardButton("📅 Изменить дни", callback_data='admin_set_vip_days'), types.InlineKeyboardButton("◀️ Назад", callback_data='admin_back'))
+    try: bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode='HTML', reply_markup=markup)
+    except: bot.send_message(call.message.chat.id, text, parse_mode='HTML', reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data in ['admin_set_vip_price', 'admin_set_vip_days'])
+def admin_set_vip(call):
+    if not is_admin(call.from_user.id): return
+    if call.data == 'admin_set_vip_price':
+        user_states[call.from_user.id] = {'state': 'admin_setting_vip_price'}; cur = float(get_setting('vip_price','5.00'))
+        text = f"💰 <b>ЦЕНА VIP</b>\n\nТекущая: ${cur:.2f}\n\n📝 Отправьте новую цену:"
+    else:
+        user_states[call.from_user.id] = {'state': 'admin_setting_vip_days'}; cur = int(get_setting('vip_days','7'))
+        text = f"📅 <b>ДНИ VIP</b>\n\nТекущее: {cur} дн.\n\n📝 Отправьте количество дней:"
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("❌ Отмена", callback_data='admin_vip_settings'))
+    try: bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode='HTML', reply_markup=markup)
+    except: bot.send_message(call.message.chat.id, text, parse_mode='HTML', reply_markup=markup)
+
+@bot.message_handler(func=lambda m: user_states.get(m.from_user.id,{}).get('state') in ['admin_setting_vip_price', 'admin_setting_vip_days'])
+def process_admin_vip(message):
+    if not is_admin(message.from_user.id): return
+    state = user_states[message.from_user.id]['state']
+    del user_states[message.from_user.id]
+    try:
+        val = float(message.text.strip())
+        if val <= 0: bot.reply_to(message, "❌ Значение должно быть положительным"); return
+    except: bot.reply_to(message, "❌ Введите число"); return
+    if state == 'admin_setting_vip_price': update_setting('vip_price', str(val)); name = f"Цена VIP: ${val:.2f}"
+    else: update_setting('vip_days', str(int(val))); name = f"Дни VIP: {int(val)} дн."
+    bot.reply_to(message, f"✅ <b>Обновлено!</b>\n\n{name}", parse_mode='HTML', reply_markup=types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("◀️ К VIP", callback_data='admin_vip_settings')))
 
 @bot.callback_query_handler(func=lambda call: call.data == 'admin_work_time')
 def admin_work_time_menu(call):
@@ -1309,7 +1676,7 @@ def admin_back(call):
     work_start = int(get_setting('work_start','8'))
     work_end = int(get_setting('work_end','20'))
     markup = types.InlineKeyboardMarkup(row_width=2)
-    markup.add(types.InlineKeyboardButton("📊 Статистика", callback_data='admin_stats'), types.InlineKeyboardButton("⚙️ Настройки", callback_data='admin_settings'), types.InlineKeyboardButton("💰 Выводы", callback_data='admin_withdrawals'), types.InlineKeyboardButton("🧹 Очистка", callback_data='admin_clear_queue'), types.InlineKeyboardButton("📢 Рассылка", callback_data='admin_broadcast'), types.InlineKeyboardButton("🔍 Поиск", callback_data='admin_search'), types.InlineKeyboardButton("🕐 Время работы", callback_data='admin_work_time'))
+    markup.add(types.InlineKeyboardButton("📊 Статистика", callback_data='admin_stats'), types.InlineKeyboardButton("⚙️ Настройки", callback_data='admin_settings'), types.InlineKeyboardButton("💰 Выводы", callback_data='admin_withdrawals'), types.InlineKeyboardButton("🧹 Очистка", callback_data='admin_clear_queue'), types.InlineKeyboardButton("📢 Рассылка", callback_data='admin_broadcast'), types.InlineKeyboardButton("🔍 Поиск", callback_data='admin_search'), types.InlineKeyboardButton("🕐 Время работы", callback_data='admin_work_time'), types.InlineKeyboardButton("🏆 Награды", callback_data='admin_prizes'), types.InlineKeyboardButton("👑 VIP", callback_data='admin_vip_settings'))
     try: bot.edit_message_text(f"👑 <b>АДМИН-ПАНЕЛЬ</b>\n\n👤 @{call.from_user.username}\n🕐 {get_msk_time().strftime('%H:%M:%S')} МСК\n\n💰 Код: ${code_price:.2f}\n📷 QR: ${qr_price:.2f}\n⏱ Холд: {ht//60} мин\n🕐 Работа: {work_start}:00 - {work_end}:00 МСК", call.message.chat.id, call.message.message_id, parse_mode='HTML', reply_markup=markup)
     except: pass
 
@@ -1347,8 +1714,10 @@ def admin_search_exec(message):
         problem = (cs[3] or 0) + (qs[3] or 0)
         active = (cs[4] or 0) + (qs[4] or 0)
         success_rate = (success/total_orders*100) if total_orders > 0 else 0
+        
+        vip_status = "👑 VIP" if is_vip(user[0]) else ""
         text = (
-            f"✅ <b>ПОЛЬЗОВАТЕЛЬ НАЙДЕН</b>\n\n"
+            f"✅ <b>ПОЛЬЗОВАТЕЛЬ НАЙДЕН</b> {vip_status}\n\n"
             f"<b>Информация</b>\n• ID: <code>{user[0]}</code>\n• Username: @{user[1] or 'Не указан'}\n• Статус: {'Заблокирован' if user[11] else 'Активен'}\n• Регистрация: {user[9][:19] if user[9] else 'Н/Д'}\n\n"
             f"<b>Финансы</b>\n• Баланс: <b>${user[2]:.2f}</b>\n• В холде: ${user[4]:.2f}\n• Заработано: ${user[3]:.2f}\n• Выведено: ${user[5]:.2f}\n\n"
             f"<b>Заказы</b>\n• Всего: {total_orders}\n• Успешно: {success} ({success_rate:.0f}%)\n• Провалено: {failed}\n• Проблемных: {problem}\n• Активных: {active}\n"
@@ -1372,6 +1741,40 @@ def admin_search_exec(message):
         markup = types.InlineKeyboardMarkup()
         markup.add(types.InlineKeyboardButton("🔍 Попробовать снова", callback_data='admin_search'), types.InlineKeyboardButton("◀️ В админ-панель", callback_data='admin_back'))
         bot.reply_to(message, "❌ <b>Пользователь не найден</b>\n\nПроверьте правильность ID или @username", parse_mode='HTML', reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('admin_user_orders_'))
+def admin_user_orders(call):
+    if not is_admin(call.from_user.id): return
+    uid = int(call.data.split('_')[3])
+    conn = sqlite3.connect('max_bot.db')
+    c = conn.cursor()
+    c.execute('SELECT username FROM users WHERE user_id=?', (uid,))
+    user = c.fetchone()
+    username = user[0] if user else "Неизвестный"
+    c.execute('SELECT id, phone_number, status, created_at FROM code_queue WHERE user_id=? ORDER BY created_at DESC LIMIT 10', (uid,))
+    codes = c.fetchall()
+    c.execute('SELECT id, status, created_at FROM qr_queue WHERE user_id=? ORDER BY created_at DESC LIMIT 5', (uid,))
+    qrs = c.fetchall()
+    conn.close()
+    
+    text = f"📱 <b>ЗАКАЗЫ @{username}</b>\n\n"
+    if codes:
+        text += "<b>📱 Коды:</b>\n"
+        for code in codes:
+            status_emoji = {'completed': '✅', 'failed': '❌', 'problem': '⚠️', 'taken': '🔄', 'waiting': '⏳'}.get(code[2], '⚪')
+            text += f"{status_emoji} #{code[0]} — <code>{code[1]}</code> — {code[3][:19]}\n"
+    else: text += "📱 Кодов: нет\n"
+    if qrs:
+        text += "\n<b>📷 QR:</b>\n"
+        for qr in qrs:
+            status_emoji = {'completed': '✅', 'failed': '❌', 'problem': '⚠️', 'taken': '🔄', 'waiting': '⏳'}.get(qr[1], '⚪')
+            text += f"{status_emoji} #{qr[0]} — {qr[2][:19]}\n"
+    else: text += "\n📷 QR: нет"
+    
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    markup.add(types.InlineKeyboardButton("🔍 Новый поиск", callback_data='admin_search'), types.InlineKeyboardButton("◀️ В админ-панель", callback_data='admin_back'))
+    try: bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode='HTML', reply_markup=markup)
+    except: bot.send_message(call.message.chat.id, text, parse_mode='HTML', reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('admin_edit_balance_'))
 def admin_edit_balance(call):
@@ -1583,4 +1986,11 @@ if __name__ == '__main__':
     print(f"📱 Работает во всех топиках")
     if PRIVATE_CHANNEL: print(f"🔒 Частный канал")
     else: print(f"📢 Публичный канал")
-    bot.polling(none_stop=True)
+    
+    while True:
+        try:
+            bot.polling(none_stop=True, timeout=60)
+        except Exception as e:
+            logger.error(f"Ошибка polling: {e}")
+            time.sleep(5)
+            print("🔄 Перезап
