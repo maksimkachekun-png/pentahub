@@ -1993,4 +1993,4 @@ if __name__ == '__main__':
         except Exception as e:
             logger.error(f"Ошибка polling: {e}")
             time.sleep(5)
-            print("🔄 Перезап
+            print("🔄 Перезапуск...")
