@@ -1392,7 +1392,7 @@ def admin_search_exec(message):
         markup.add(types.InlineKeyboardButton("◀️ В админ-панель", callback_data='admin_back'))
         
         bot.reply_to(message, text, parse_mode='HTML', reply_markup=markup)
-   else:
+    else:
         conn.close()
         markup = types.InlineKeyboardMarkup()
         markup.add(types.InlineKeyboardButton("🔍 Попробовать снова", callback_data='admin_search'), types.InlineKeyboardButton("◀️ В админ-панель", callback_data='admin_back'))
