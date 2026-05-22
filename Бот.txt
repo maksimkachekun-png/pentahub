@@ -1500,15 +1500,24 @@ def admin_withdrawals(call):
     c.execute('SELECT wr.id, wr.user_id, u.username, wr.amount FROM withdraw_requests wr LEFT JOIN users u ON wr.user_id=u.user_id WHERE wr.status="pending" ORDER BY wr.created_at ASC')
     pending = c.fetchall()
     conn.close()
-    text = "💳 **ЗАЯВКИ НА ВЫВОД**\n\n"
+    
+    text = "💳 <b>ЗАЯВКИ НА ВЫВОД</b>\n\n"
     if pending:
         text += "🔴 Ожидают обработки:\n\n"
-        for w in pending: text += f"📋 #{w[0]} — @{w[2] or 'Нет'} — ${w[3]:.2f}\n"
-    else: text += "✅ Нет ожидающих заявок\n"
+        for w in pending: 
+            text += f"📋 #{w[0]} — @{w[2] or 'Нет'} — ${w[3]:.2f}\n"
+    else: 
+        text += "✅ Нет ожидающих заявок\n"
+    
     markup = types.InlineKeyboardMarkup(row_width=1)
-    for w in pending: markup.add(types.InlineKeyboardButton(f"💰 #{w[0]} — ${w[3]:.2f}", callback_data=f'process_withdraw_{w[0]}'))
+    for w in pending: 
+        markup.add(types.InlineKeyboardButton(f"💰 #{w[0]} — ${w[3]:.2f}", callback_data=f'process_withdraw_{w[0]}'))
     markup.add(types.InlineKeyboardButton("◀️ Назад", callback_data='admin_back'))
-    bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode='Markdown', reply_markup=markup)
+    
+    try:
+        bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode='HTML', reply_markup=markup)
+    except:
+        bot.send_message(call.message.chat.id, text, parse_mode='HTML', reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data == 'admin_clear_all')
 def admin_clear_all_confirm(call):
